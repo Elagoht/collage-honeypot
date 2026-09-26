@@ -1,0 +1,68 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/honeypot",
+  "description": "A collage plugin that stops form spam without a CAPTCHA: a decoy field people never see, and a signed timestamp that says how long the form was open.",
+  "repository": "https://github.com/Elagoht/collage-honeypot",
+  "templateFunctions": [
+    {
+      "name": "honeypot",
+      "signature": "honeypot",
+      "insert": "honeypot",
+      "doc": "The invisible decoy field and signed timestamp that stop form spam bots. Put it inside every protected form."
+    }
+  ],
+  "snippets": {
+    "collage-honeypot": {
+      "language": "html",
+      "prefix": "choney",
+      "body": [
+        "{{honeypot}}"
+      ],
+      "description": "collage-honeypot: the decoy field that stops spam bots, inside a form"
+    }
+  },
+  "config": {
+    "type": "object",
+    "description": "A collage plugin that stops form spam without a CAPTCHA: a decoy field people never see, and a signed timestamp that says how long the form was open.",
+    "properties": {
+      "field": {
+        "type": "string",
+        "description": "Field is the decoy's name: something a bot is keen to fill in. Default \"website\"."
+      },
+      "key": {
+        "type": "string",
+        "description": "KeyHex is Key, hex-encoded, as configuration carries it."
+      },
+      "maxAge": {
+        "type": "integer",
+        "description": "MaxAge is how many seconds a served form stays good for. Default 86400, one day."
+      },
+      "maxBody": {
+        "type": "integer",
+        "description": "MaxBody is the largest body, in bytes, the plugin reads to check it; a larger form body is refused with 413. Default 4 MiB, collage's own default limit on an action's body. Raise it with an action's WithMaxBodyBytes for a form that uploads large files."
+      },
+      "minDelay": {
+        "type": "number",
+        "description": "MinDelay is how many seconds a form must be open before it is sent; a person takes longer than that to read and fill one in. Default 2; -1 turns the check off."
+      },
+      "protect": {
+        "type": "array",
+        "description": "Protect are the path prefixes whose submissions are checked. Default [\"/\"], every form the site accepts — each of which must then carry {{honeypot}}.",
+        "items": {
+          "type": "string"
+        }
+      },
+      "silent": {
+        "type": "boolean",
+        "description": "Silent answers a refused submission with 303 See Other to the page it came from, as an accepted form is answered, so a bot believes it succeeded and does not try another way. Default false: 400 Bad Request."
+      },
+      "skip": {
+        "type": "array",
+        "description": "Skip are path prefixes never checked, even under Protect. Default [\"/_collage/\"].",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

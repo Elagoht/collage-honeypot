@@ -158,6 +158,12 @@ starting.
 
 ## Changes
 
+### v0.1.2
+
+- `collage.json`: the plugin described to editors — its template functions,
+  snippets and configuration schema — for the Collage Snippets & Highlighter
+  extension and any tool reading it.
+
 ### v0.1.1
 
 - README: collage v0.24.0 cleans paths before middleware; the plugin keeps skipping only clean paths as a second line.
