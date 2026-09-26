@@ -289,12 +289,20 @@ func TestOtherRequestsPass(t *testing.T) {
 	}
 
 	h, _ = site(t, honeypot.Options{Key: key})
-	for path, want := range map[string]bool{"/_collage/x": false, "/_collage/../contact": true} {
+	for path, want := range map[string]bool{"/_collage/x": false, "/contact": true} {
 		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader("a=b"))
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		if refused := serve(h, r).Code == http.StatusBadRequest; refused != want {
 			t.Errorf("%s: refused %v, want %v", path, refused, want)
 		}
+	}
+	// collage redirects a path with dot segments to its clean spelling before
+	// any middleware runs — 308, since a POST carries a body — so it never passes
+	// as a development endpoint; the plugin's own check stays behind that.
+	r = httptest.NewRequest(http.MethodPost, "/_collage/../contact", strings.NewReader("a=b"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if rec := serve(h, r); rec.Code != http.StatusPermanentRedirect || rec.Header().Get("Location") != "/contact" {
+		t.Errorf("/_collage/../contact: %d %q, want collage's redirect to /contact", rec.Code, rec.Header().Get("Location"))
 	}
 }
 

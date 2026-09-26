@@ -114,7 +114,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.0" }
+func (p *Plugin) Version() string                { return "0.1.1" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
@@ -257,9 +257,10 @@ func (p *Plugin) checks(r *http.Request) bool {
 	if err != nil || (media != "application/x-www-form-urlencoded" && media != "multipart/form-data") {
 		return false
 	}
-	// Skipped only when the path was clean already: collage's router does not
-	// clean paths, so /_collage/../contact must not pass as a development
-	// endpoint.
+	// Skipped only when the path was clean already, so /_collage/../contact never
+	// passes as a development endpoint. collage v0.24.0 redirects such a path
+	// before any middleware runs; this stays as a second line, for a handler
+	// that does not.
 	clean := cleanPath(r.URL.Path)
 	if clean == r.URL.Path {
 		for _, prefix := range p.opts.Skip {

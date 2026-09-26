@@ -20,7 +20,7 @@ app, err := collage.New(&collage.Config{
 </form>
 ```
 
-Requires collage v0.23.0 or later. Register it in `Config.Plugins`: it adds a
+Requires collage v0.24.0 or later. Register it in `Config.Plugins`: it adds a
 template function, which only a plugin registered there can.
 
 ## What is refused
@@ -41,8 +41,10 @@ does every `GET`.
 **Every form posted to a protected path must carry `{{honeypot}}`**, or it is
 refused for want of a timestamp. `Protect` narrows the paths — `["/contact",
 "/comments"]` — and `Skip` excludes some, by default collage's own `/_collage/`.
-A path is skipped only when it has no dot segments: collage's router does not
-clean paths, so `/_collage/../contact` is checked like `/contact`.
+collage redirects a path with dot segments to its clean spelling before any
+middleware runs, so `/_collage/../contact` arrives as `/contact` and is checked.
+The plugin does not rely on that alone: a path is skipped only when it has no dot
+segments.
 
 A refusal is `400 Bad Request` with a one-line text body telling a person to wait
 a moment and send the form again. With `Silent` it is instead a `303 See Other`
@@ -153,3 +155,10 @@ starting.
 - Every HTML response is held in memory until it is complete, to find the
   placeholder, so an HTML response cannot be streamed while the plugin is
   registered.
+
+## Changes
+
+### v0.1.1
+
+- README: collage v0.24.0 cleans paths before middleware; the plugin keeps skipping only clean paths as a second line.
+- Requires collage v0.24.0.
