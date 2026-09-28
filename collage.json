@@ -6,9 +6,9 @@
   "templateFunctions": [
     {
       "name": "honeypot",
-      "signature": "honeypot",
+      "signature": "honeypot [seconds]",
       "insert": "honeypot",
-      "doc": "The invisible decoy field and signed timestamp that stop form spam bots. Put it inside every protected form."
+      "doc": "The invisible decoy field and signed timestamp that stop form spam bots, and protect the path the form posts to. `seconds` is the least time the form must be open before it is sent, signed into the timestamp; none by default."
     }
   ],
   "snippets": {
@@ -43,11 +43,11 @@
       },
       "minDelay": {
         "type": "number",
-        "description": "MinDelay is how many seconds a form must be open before it is sent; a person takes longer than that to read and fill one in. Default 2; -1 turns the check off."
+        "description": "MinDelay is how many seconds a form must be open before it is sent, for a form that does not choose its own with {{honeypot seconds}}. It catches a script that fetches a form and posts it back at once. Default 0: off, since a person with autofill and Enter is fast, and a script that knows the delay only has to wait it out."
       },
       "protect": {
         "type": "array",
-        "description": "Protect are the path prefixes whose submissions are checked. Default [\"/\"], every form the site accepts — each of which must then carry {{honeypot}}.",
+        "description": "Protect are path prefixes whose submissions are checked even before a form naming them has been served. Default none: a path is checked once a page with a {{honeypot}} form posting to it has gone out from this process. [\"/\"] checks every form the site accepts, each of which must then carry {{honeypot}}.",
         "items": {
           "type": "string"
         }
@@ -63,6 +63,7 @@
           "type": "string"
         }
       }
-    }
+    },
+    "additionalProperties": false
   }
 }

@@ -94,10 +94,14 @@ func appWith(t *testing.T, opts honeypot.Options, config map[string]json.RawMess
 	return a, got
 }
 
+// site is the app's handler, with the form served once, so the path it posts to
+// is one the plugin checks.
 func site(t *testing.T, opts honeypot.Options) (http.Handler, *received) {
 	t.Helper()
 	a, got := app(t, opts, nil)
-	return a.Handler(), got
+	h := a.Handler()
+	serve(h, httptest.NewRequest(http.MethodGet, "/", nil))
+	return h, got
 }
 
 func serve(h http.Handler, r *http.Request) *httptest.ResponseRecorder {
@@ -317,13 +321,14 @@ func TestMaxBody(t *testing.T) {
 // Configuration overlays the options, the key included.
 func TestConfiguration(t *testing.T) {
 	a, _ := app(t, honeypot.Options{}, map[string]json.RawMessage{
-		honeypot.Name: json.RawMessage(`{"key": "` + hex.EncodeToString(key) + `", "field": "homepage", "minDelay": -1}`),
+		honeypot.Name: json.RawMessage(`{"key": "` + hex.EncodeToString(key) + `", "field": "homepage", "minDelay": -1, "protect": ["/contact"]}`),
 	})
 	h := a.Handler()
 	if body := serve(h, httptest.NewRequest(http.MethodGet, "/", nil)).Body.String(); !strings.Contains(body, `name="homepage"`) {
 		t.Errorf("the field was not renamed:\n%s", body)
 	}
-	// Signed with the configured key, and sent at once: minDelay is off.
+	// Signed with the configured key, and sent at once: minDelay is off, as -1
+	// turned it off before 0 did.
 	values := url.Values{"message": {"hi"}, "_hpt": {signed(key, time.Now())}}
 	if rec := post(h, values); rec.Code != http.StatusSeeOther {
 		t.Errorf("status %d", rec.Code)
@@ -429,6 +434,192 @@ func TestUndeclaredHTML(t *testing.T) {
 		}
 		if path == "/status" && res.StatusCode != http.StatusUnprocessableEntity {
 			t.Errorf("%s: status %d", path, res.StatusCode)
+		}
+	}
+}
+
+// signedWith makes a timestamp in the current format: the time, the delay its
+// form asked for in milliseconds, and an HMAC of both.
+func signedWith(k []byte, at time.Time, delayMS int) string {
+	ms := strconv.FormatInt(at.UnixMilli(), 10)
+	d := strconv.Itoa(delayMS)
+	m := hmac.New(sha256.New, k)
+	m.Write([]byte("collage-honeypot:ts:" + ms + ":" + d))
+	return ms + "." + d + "." + base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:18])
+}
+
+// learning is a site of several forms, served by a real server: one without
+// {{honeypot}}, and ones with it whose actions are spelled every way a page
+// spells them.
+func learning(t *testing.T, opts honeypot.Options) (*httptest.Server, *received) {
+	t.Helper()
+	pages := map[string]string{
+		"plain":    `<form method="post" action="/register"><input name="message"></form>`,
+		"quoted":   `<FORM method="post" ACTION="/login"><form-field action="/nowhere">{{honeypot}}</form-field><input name="message"></FORM>`,
+		"bare":     `<form method=post action=/profile>{{honeypot}}<input name=message></form>`,
+		"relative": `<p>İstanbul</p><form method="post" action="7/comments?x=1&amp;y=2">{{honeypot}}</form>`,
+		"self":     `<form method="post">{{honeypot 0}}</form>`,
+		"slow":     `<form method="post" action="/slow">{{honeypot 0.05}}</form>`,
+		"away":     `<form method="post" action="https://elsewhere.example/steal">{{honeypot}}</form>`,
+	}
+	files := fstest.MapFS{}
+	for name, body := range pages {
+		files["t/"+name+".html"] = &fstest.MapFile{Data: []byte(`<html><body>` + body + `</body></html>`)}
+	}
+	a, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: files, Root: "t"},
+		Security: collage.SecurityConfig{CSRFKey: key},
+		Plugins:  []collage.Plugin{honeypot.New(opts)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := map[string]string{"plain": "/join", "quoted": "/in", "bare": "/me", "relative": "/stories/7", "self": "/logout", "slow": "/slow-form", "away": "/away"}
+	for name, path := range paths {
+		if err := a.RegisterPage(collage.NewPage(name).WithContent(collage.NewFragment(name, name+".html").Build()).WithPath("en", path).Build()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := &received{}
+	for i, path := range []string{"/register", "/login", "/profile", "/stories/7/comments", "/logout", "/slow", "/steal"} {
+		action := collage.NewAction("a"+strconv.Itoa(i)).WithPath("en", path).WithMethods(http.MethodPost).WithoutCSRF().
+			WithHandler(func(_ context.Context, rc *collage.RenderContext) (*collage.ActionResult, error) {
+				got.add(rc.Request.URL.Path)
+				return collage.SeeOther("/thanks"), nil
+			}).Build()
+		if err := a.RegisterAction(action); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(a.Handler())
+	t.Cleanup(srv.Close)
+	return srv, got
+}
+
+func fetch(t *testing.T, srv *httptest.Server, path string) string {
+	t.Helper()
+	res, err := http.Get(srv.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	return string(body)
+}
+
+var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+func submit(t *testing.T, srv *httptest.Server, path string, values url.Values) int {
+	t.Helper()
+	res, err := noRedirect.Post(srv.URL+path, "application/x-www-form-urlencoded", strings.NewReader(values.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	return res.StatusCode
+}
+
+// A path is checked once a {{honeypot}} form posting to it has been served, and
+// never when no such form has: nothing in the configuration names it.
+func TestLearnsFromForms(t *testing.T) {
+	srv, _ := learning(t, honeypot.Options{Key: key})
+	bare := url.Values{"message": {"spam"}}
+	targets := map[string]string{"/in": "/login", "/me": "/profile", "/stories/7": "/stories/7/comments", "/logout": "/logout"}
+	for _, target := range targets {
+		if code := submit(t, srv, target, bare); code != http.StatusSeeOther {
+			t.Errorf("%s before its form was served: %d, want it unchecked", target, code)
+		}
+	}
+	for page, target := range targets {
+		body := fetch(t, srv, page)
+		if code := submit(t, srv, target, bare); code != http.StatusBadRequest {
+			t.Errorf("%s after %s was served: %d, want 400", target, page, code)
+		}
+		m := stampValue.FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("%s carries no timestamp:\n%s", page, body)
+		}
+		if code := submit(t, srv, target, form(m[1])); code != http.StatusSeeOther {
+			t.Errorf("%s with its timestamp: %d", target, code)
+		}
+	}
+	// A form without {{honeypot}} is never checked, and one posting to another
+	// host teaches nothing about this one.
+	fetch(t, srv, "/join")
+	fetch(t, srv, "/away")
+	for _, target := range []string{"/register", "/steal"} {
+		if code := submit(t, srv, target, bare); code != http.StatusSeeOther {
+			t.Errorf("%s: %d, want it unchecked", target, code)
+		}
+	}
+}
+
+// Protect checks a path before any form naming it has been served.
+func TestProtectBeforeServing(t *testing.T) {
+	srv, _ := learning(t, honeypot.Options{Key: key, Protect: []string{"/login"}})
+	if code := submit(t, srv, "/login", url.Values{"message": {"spam"}}); code != http.StatusBadRequest {
+		t.Errorf("/login: %d, want 400", code)
+	}
+}
+
+// No delay is asked for by default, a form may ask for its own, and the delay it
+// asked for is signed: a bot cannot shorten it.
+func TestDelays(t *testing.T) {
+	srv, _ := learning(t, honeypot.Options{Key: key})
+	stamp := func(page string) string {
+		m := stampValue.FindStringSubmatch(fetch(t, srv, page))
+		if m == nil {
+			t.Fatalf("%s carries no timestamp", page)
+		}
+		return m[1]
+	}
+	for page, target := range map[string]string{"/in": "/login", "/logout": "/logout"} {
+		if code := submit(t, srv, target, form(stamp(page))); code != http.StatusSeeOther {
+			t.Errorf("%s sent at once: %d, want accepted", target, code)
+		}
+	}
+	slow := stamp("/slow-form")
+	if code := submit(t, srv, "/slow", form(slow)); code != http.StatusBadRequest {
+		t.Errorf("/slow sent at once: %d, want 400", code)
+	}
+	parts := strings.Split(slow, ".")
+	if len(parts) != 3 || parts[1] != "50" {
+		t.Fatalf("stamp %q, want its delay of 50ms in it", slow)
+	}
+	if code := submit(t, srv, "/slow", form(parts[0]+".0."+parts[2])); code != http.StatusBadRequest {
+		t.Errorf("/slow with its delay edited to 0: %d, want 400", code)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if code := submit(t, srv, "/slow", form(slow)); code != http.StatusSeeOther {
+		t.Errorf("/slow after its delay: %d", code)
+	}
+	// A timestamp from v0.1, served before an upgrade, is still good.
+	if code := submit(t, srv, "/login", form(signed(key, time.Now()))); code != http.StatusSeeOther {
+		t.Errorf("a v0.1 timestamp: %d", code)
+	}
+	if code := submit(t, srv, "/login", form(signedWith(key, time.Now(), 0))); code != http.StatusSeeOther {
+		t.Errorf("a signed timestamp: %d", code)
+	}
+}
+
+// A delay {{honeypot}} cannot keep is a render error, not a form nobody can send.
+func TestBadDelay(t *testing.T) {
+	for _, call := range []string{"{{honeypot -1}}", "{{honeypot 1 2}}", "{{honeypot 100000}}"} {
+		a, err := collage.New(&collage.Config{
+			Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+			Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<form method="post">` + call + `</form>`)}}, Root: "t"},
+			Plugins:  []collage.Plugin{honeypot.New(honeypot.Options{Key: key, MaxAge: 3600})},
+		})
+		if err != nil {
+			continue
+		}
+		if err := a.RegisterPage(collage.NewPage("p").WithContent(collage.NewFragment("p", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
+			t.Fatal(err)
+		}
+		rec := serve(a.Handler(), httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code == http.StatusOK && strings.Contains(rec.Body.String(), "_hpt") {
+			t.Errorf("%s rendered a form:\n%s", call, rec.Body.String())
 		}
 	}
 }

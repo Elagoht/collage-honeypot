@@ -1,9 +1,10 @@
 # elagoht/honeypot
 
 A collage plugin that stops form spam without a CAPTCHA: a decoy field people
-never see and bots fill in, and a signed timestamp that refuses a form sent back
-sooner than a person could have filled it in. It supplies the mechanism; each form
-says where with `{{honeypot}}`.
+never see and bots fill in, and a signed timestamp that refuses a form that was
+never served, was served too long ago, or — when the form asks — came back too
+soon. It supplies the mechanism; each form says where with `{{honeypot}}`, and
+nothing in the configuration has to name the forms.
 
 ```go
 app, err := collage.New(&collage.Config{
@@ -31,20 +32,54 @@ is checked before it reaches the action, and refused when:
 
 - the decoy field was filled in;
 - it carries no timestamp, or one the site did not sign;
-- it came back sooner than `MinDelay` seconds after the page was served (default
-  2) — a bot posts at once, a person reads first;
-- the page was served more than `MaxAge` seconds ago (default one day).
+- the page was served more than `MaxAge` seconds ago (default one day);
+- it came back sooner than the form's delay after the page was served, when there
+  is one: see [The delay](#the-delay).
 
 Any other body — a JSON API, a `fetch` sending JSON — passes unchecked, and so
 does every `GET`.
 
-**Every form posted to a protected path must carry `{{honeypot}}`**, or it is
-refused for want of a timestamp. `Protect` narrows the paths — `["/contact",
-"/comments"]` — and `Skip` excludes some, by default collage's own `/_collage/`.
+## Which paths are protected
+
+The forms say. Every form the plugin stamps names the path it posts to — its
+`action`, resolved against the page's URL, or the page's own path when it has
+none — and from then on a form body posted to that path must carry the fields. A
+form without `{{honeypot}}` is never checked, so a sign-up form can go without
+while the login form beside it is protected, and nothing in the configuration
+names either.
+
+What a process has learned it keeps in memory, up to 4096 paths. **Until a page
+with the form has gone out, its path is not checked**: after a restart or a new
+release, or on an instance that has not served it yet, a bot that posts straight
+to the path without fetching the form first gets through, until the first reader
+fetches it. `Protect` closes that gap for the paths that matter: its prefixes are
+checked from the first request, and every form posted under them must carry
+`{{honeypot}}`. `["/"]` checks every form the site accepts.
+
+`Skip` excludes prefixes from both, by default collage's own `/_collage/`.
 collage redirects a path with dot segments to its clean spelling before any
 middleware runs, so `/_collage/../contact` arrives as `/contact` and is checked.
 The plugin does not rely on that alone: a path is skipped only when it has no dot
 segments.
+
+A form whose button carries its own `formaction` is learned by the form's
+`action`, not the button's; name such a path in `Protect`.
+
+## The delay
+
+By default a form may be sent back at once. A delay catches a script that fetches
+the form and posts it back in the same breath, but a person with the browser's
+autofill and Enter is fast too, and a script that knows the delay only has to wait
+it out. A form that wants one asks for it in seconds:
+
+```html
+{{honeypot 0.3}}
+```
+
+The delay is signed into the timestamp, so a bot cannot shorten it by editing the
+field. `MinDelay` sets one for every form that does not choose its own;
+`{{honeypot 0}}` turns it off for one form, a logout button say, whatever
+`MinDelay` is.
 
 A refusal is `400 Bad Request` with a one-line text body telling a person to wait
 a moment and send the form again. With `Silent` it is instead a `303 See Other`
@@ -122,32 +157,34 @@ matches.
   "elagoht/honeypot": {
     "key": "hex-encoded, 32 bytes or more",
     "field": "website",
-    "minDelay": 2,
+    "minDelay": 0,
     "maxAge": 86400,
     "silent": false,
-    "protect": ["/"],
+    "protect": [],
     "skip": ["/_collage/"],
     "maxBody": 4194304
   }
 }
 ```
 
-`minDelay` is seconds and may be fractional; `-1` turns the check off. A key that
-is short or not hex, a field that is not a plain name, a `minDelay` not shorter
-than `maxAge`, a prefix without a leading `/` — each stops the application from
-starting.
+`minDelay` is seconds and may be fractional; `0`, the default, turns the check
+off, as `-1` did before v0.2.0 and still does. A key that is short or not hex, a
+field that is not a plain name, a `minDelay` not shorter than `maxAge`, a prefix
+without a leading `/` — each stops the application from starting. A delay
+`{{honeypot}}` cannot keep, negative or not shorter than `maxAge`, fails the
+render.
 
 ## Limitations
 
 - **It stops careless bots, not a determined one.** A script that fetches the
-  page, waits two seconds and posts the fields it found passes, and one timestamp
-  serves it for `MaxAge`. Pair it with
+  page, waits out any delay and posts the fields it found passes, and one
+  timestamp serves it for `MaxAge`. Pair it with
   [elagoht/ratelimit](https://github.com/Elagoht/collage-ratelimit), and with
   moderation for what matters.
-- A person who submits within `MinDelay` — a form filled by the browser's autofill
-  and sent at once — is refused. The message asks them to wait and send it again;
-  with `Silent` they are sent back to the form with no message at all, so keep
-  `Silent` for forms where that is acceptable.
+- With a delay, a person who submits within it — a form filled by the browser's
+  autofill and sent at once — is refused. The message asks them to wait and send
+  it again; with `Silent` they are sent back to the form with no message at all,
+  so keep `Silent` for forms where that is acceptable.
 - A browser extension or assistive tool that fills every field it finds, hidden or
   not, fills the decoy.
 - A form built by JavaScript must include both fields: `new FormData(form)` does,
@@ -157,6 +194,19 @@ starting.
   registered.
 
 ## Changes
+
+### v0.2.0
+
+- **The forms say which paths are protected.** A path is checked once a page with
+  a `{{honeypot}}` form posting to it has been served; a form without
+  `{{honeypot}}` is never checked. `Protect` no longer defaults to `["/"]`: its
+  prefixes are checked from the first request, and `["/"]` restores the old
+  behaviour.
+- **No delay by default.** `MinDelay` defaults to `0`, off; `-1` still turns it
+  off. `{{honeypot seconds}}` gives one form its own delay, signed into the
+  timestamp.
+- A timestamp now carries its form's delay. One served by v0.1, open in a tab
+  across the upgrade, is still accepted.
 
 ### v0.1.3
 
