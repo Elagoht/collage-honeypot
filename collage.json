@@ -37,10 +37,6 @@
         "type": "integer",
         "description": "MaxAge is how many seconds a served form stays good for. Default 86400, one day."
       },
-      "maxBody": {
-        "type": "integer",
-        "description": "MaxBody is the largest body, in bytes, the plugin reads to check it; a larger form body is refused with 413. Default 4 MiB, collage's own default limit on an action's body. Raise it with an action's WithMaxBodyBytes for a form that uploads large files."
-      },
       "minDelay": {
         "type": "number",
         "description": "MinDelay is how many seconds a form must be open before it is sent, for a form that does not choose its own with {{honeypot seconds}}. It catches a script that fetches a form and posts it back at once. Default 0: off, since a person with autofill and Enter is fast, and a script that knows the delay only has to wait it out."

@@ -50,7 +50,6 @@ import (
 	"fmt"
 	"html"
 	"html/template"
-	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -105,17 +104,13 @@ type Options struct {
 	// Skip are path prefixes never checked, even under Protect. Default
 	// ["/_collage/"].
 	Skip []string `json:"skip"`
-	// MaxBody is the largest body, in bytes, the plugin reads to check it; a
-	// larger form body is refused with 413. Default 4 MiB, collage's own
-	// default limit on an action's body. Raise it with an action's
-	// WithMaxBodyBytes for a form that uploads large files.
-	MaxBody int64 `json:"maxBody"`
 }
 
 var (
 	_ collage.Plugin           = (*Plugin)(nil)
 	_ collage.Configurer       = (*Plugin)(nil)
 	_ collage.BeforeRenderHook = (*Plugin)(nil)
+	_ collage.BeforeActionHook = (*Plugin)(nil)
 )
 
 // Plugin checks submitted forms.
@@ -175,7 +170,7 @@ func (l *learned) add(path string) (filled bool) {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.2.0" }
+func (p *Plugin) Version() string                { return "0.3.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
@@ -228,12 +223,6 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	if o.MinDelay > 0 && o.MinDelay >= float64(o.MaxAge) {
 		return errors.New("honeypot: minDelay must be shorter than maxAge, or no form could be sent")
 	}
-	if o.MaxBody < 0 {
-		return errors.New("honeypot: maxBody cannot be negative")
-	}
-	if o.MaxBody == 0 {
-		o.MaxBody = 4 << 20
-	}
 	if o.Skip == nil {
 		o.Skip = []string{"/_collage/"}
 	}
@@ -264,8 +253,7 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	})
 }
 
-// Init wraps every request: submissions are checked, and forms served are
-// given their timestamp.
+// Init wraps every request, to give the forms served their timestamp.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	if p.marker == "" {
 		return errors.New("honeypot: register the plugin in Config.Plugins, where Configure runs; {{honeypot}} needs it")
@@ -305,15 +293,10 @@ func (p *Plugin) fields(static bool, delay int) template.HTML {
 	return template.HTML(decoy + `<input type="hidden" name="` + TimeField + `" value="` + placeholder + `">`)
 }
 
+// middleware gives the forms served their timestamp. Submissions are checked in
+// OnBeforeAction, where the body has the action's own limit.
 func (p *Plugin) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if p.checks(r) {
-			reason, status := p.inspect(r)
-			if reason != "" {
-				p.refuse(w, r, reason, status)
-				return
-			}
-		}
 		sw := &stampWriter{ResponseWriter: w, plugin: p, request: r, head: r.Method == http.MethodHead}
 		next.ServeHTTP(sw, r)
 		sw.finish()
@@ -362,64 +345,68 @@ func cleanPath(p string) string {
 	return c
 }
 
-// inspect reads the submission and returns why it is refused, or "".
-//
-// The body is read here, before routing, so it is read into memory and put back
-// for the action to read again: collage's forgery check and the action's own
-// parsing see the request exactly as it arrived.
-func (p *Plugin) inspect(r *http.Request) (string, int) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, p.opts.MaxBody+1))
-	_ = r.Body.Close()
-	r.Body = io.NopCloser(bytes.NewReader(body))
+// OnBeforeAction checks a submission to an action, after collage has put the
+// action's body limit on it and checked its forgery token. The form is read
+// through that limit and stays parsed for the handler; a body past it is the
+// action's 413, not the plugin's.
+func (p *Plugin) OnBeforeAction(_ context.Context, ev *collage.BeforeActionEvent) error {
+	r := ev.Request
+	if !p.checks(r) {
+		return nil
+	}
+	form, err := ev.Form()
 	if err != nil {
-		return "the body could not be read", http.StatusBadRequest
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return err
+		}
+		ev.Result = p.refusal(r, "the form could not be parsed")
+		return nil
 	}
-	if int64(len(body)) > p.opts.MaxBody {
-		return "the body is larger than maxBody", http.StatusRequestEntityTooLarge
+	if reason := p.inspect(form); reason != "" {
+		ev.Result = p.refusal(r, reason)
 	}
-	form := r.Clone(r.Context())
-	form.Body = io.NopCloser(bytes.NewReader(body))
-	form.Form, form.PostForm, form.MultipartForm = nil, nil, nil
-	if err := form.ParseMultipartForm(p.opts.MaxBody); err != nil && !errors.Is(err, http.ErrNotMultipart) {
-		return "the form could not be parsed", http.StatusBadRequest
+	return nil
+}
+
+// inspect returns why a submitted form is refused, or "".
+func (p *Plugin) inspect(form url.Values) string {
+	if form.Get(p.opts.Field) != "" {
+		return "the decoy field was filled in"
 	}
-	if form.MultipartForm != nil {
-		defer func() { _ = form.MultipartForm.RemoveAll() }()
-	}
-	if form.PostForm.Get(p.opts.Field) != "" {
-		return "the decoy field was filled in", http.StatusBadRequest
-	}
-	stamp := form.PostForm.Get(TimeField)
+	stamp := form.Get(TimeField)
 	if stamp == "" {
-		return "the form carried no timestamp", http.StatusBadRequest
+		return "the form carried no timestamp"
 	}
 	served, delay, ok := p.verify(stamp)
 	if !ok {
-		return "the timestamp is not one the site signed", http.StatusBadRequest
+		return "the timestamp is not one the site signed"
 	}
 	age := time.Now().Sub(served)
 	switch {
 	case age < -time.Minute:
-		return "the timestamp is in the future", http.StatusBadRequest
+		return "the timestamp is in the future"
 	case age < delay:
-		return "the form was sent too soon after it was served", http.StatusBadRequest
+		return "the form was sent too soon after it was served"
 	case age > time.Duration(p.opts.MaxAge)*time.Second:
-		return "the form was served too long ago", http.StatusBadRequest
+		return "the form was served too long ago"
 	}
-	return "", 0
+	return ""
 }
 
-func (p *Plugin) refuse(w http.ResponseWriter, r *http.Request, reason string, status int) {
+// refusal is what a refused submission is answered with: 400 and a line telling a
+// person what to do, or, with Silent, the redirect an accepted form gets.
+// collage marks either no-store, as it does every action's answer.
+func (p *Plugin) refusal(r *http.Request, reason string) *collage.ActionResult {
 	p.log.Debug("honeypot: refused a submission", "path", r.URL.Path, "reason", reason)
-	h := w.Header()
-	h.Set("Cache-Control", "no-store")
-	if p.opts.Silent && status == http.StatusBadRequest {
-		http.Redirect(w, r, back(r), http.StatusSeeOther)
-		return
+	if p.opts.Silent {
+		return collage.SeeOther(back(r))
 	}
-	h.Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(status)
-	_, _ = io.WriteString(w, "The form could not be accepted. If you filled it in yourself, go back, wait a moment and send it again.\n")
+	return &collage.ActionResult{
+		Status:      http.StatusBadRequest,
+		ContentType: "text/plain; charset=utf-8",
+		Body:        []byte("The form could not be accepted. If you filled it in yourself, go back, wait a moment and send it again.\n"),
+	}
 }
 
 // back is where a silent refusal sends the client: the page the form was on, when

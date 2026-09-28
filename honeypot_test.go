@@ -311,10 +311,52 @@ func TestOtherRequestsPass(t *testing.T) {
 	}
 }
 
-func TestMaxBody(t *testing.T) {
-	h, _ := site(t, honeypot.Options{Key: key, MaxBody: 64})
-	if rec := post(h, url.Values{"message": {strings.Repeat("x", 100)}}); rec.Code != http.StatusRequestEntityTooLarge {
-		t.Errorf("status %d, want 413", rec.Code)
+// The body is the action's to bound, not the plugin's: a form larger than
+// collage's default goes through to an action that allows it, and one past an
+// action's limit is that action's 413.
+func TestTheActionBoundsTheBody(t *testing.T) {
+	a, err := collage.New(&collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{
+			"t/p.html": {Data: []byte(`<form method="post" action="/upload">{{honeypot}}</form><form method="post" action="/small">{{honeypot}}</form>`)},
+		}, Root: "t"},
+		Plugins: []collage.Plugin{honeypot.New(honeypot.Options{Key: key})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RegisterPage(collage.NewPage("p").WithContent(collage.NewFragment("p", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
+		t.Fatal(err)
+	}
+	got := &received{}
+	for path, limit := range map[string]int64{"/upload": 8 << 20, "/small": 64} {
+		action := collage.NewAction(strings.TrimPrefix(path, "/")).WithPath("en", path).WithMethods(http.MethodPost).WithoutCSRF().WithMaxBodyBytes(limit).
+			WithHandler(func(_ context.Context, rc *collage.RenderContext) (*collage.ActionResult, error) {
+				got.add(strconv.Itoa(len(rc.Request.FormValue("message"))))
+				return collage.SeeOther("/thanks"), nil
+			}).Build()
+		if err := a.RegisterAction(action); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := a.Handler()
+	stamp := stampOf(t, h)
+	send := func(path string, values url.Values) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(values.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return serve(h, r)
+	}
+	big := form(stamp)
+	big.Set("message", strings.Repeat("x", 5<<20))
+	if rec := send("/upload", big); rec.Code != http.StatusSeeOther || got.last() != strconv.Itoa(5<<20) {
+		t.Errorf("5 MiB to an action allowing 8: %d, action saw %s bytes", rec.Code, got.last())
+	}
+	if rec := send("/small", big); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("past the action's limit: %d, want 413", rec.Code)
+	}
+	// Refused still, once the form fits.
+	if rec := send("/upload", url.Values{"message": {"spam"}}); rec.Code != http.StatusBadRequest {
+		t.Errorf("no timestamp: %d, want 400", rec.Code)
 	}
 }
 
@@ -369,7 +411,6 @@ func TestMisconfiguration(t *testing.T) {
 		"negative delay":   {Key: key, MinDelay: -2},
 		"delay past age":   {Key: key, MinDelay: 10, MaxAge: 5},
 		"relative prefix":  {Key: key, Protect: []string{"contact"}},
-		"negative body":    {Key: key, MaxBody: -1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := collage.New(&collage.Config{

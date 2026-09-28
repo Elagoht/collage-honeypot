@@ -21,14 +21,14 @@ app, err := collage.New(&collage.Config{
 </form>
 ```
 
-Requires collage v0.24.0 or later. Register it in `Config.Plugins`: it adds a
+Requires collage v0.31.0 or later. Register it in `Config.Plugins`: it adds a
 template function, which only a plugin registered there can.
 
 ## What is refused
 
 Every `POST`, `PUT`, `PATCH` and `DELETE` with a form body —
-`application/x-www-form-urlencoded` or `multipart/form-data` — to a protected path
-is checked before it reaches the action, and refused when:
+`application/x-www-form-urlencoded` or `multipart/form-data` — to an action on a
+protected path is checked before the action's handler runs, and refused when:
 
 - the decoy field was filled in;
 - it carries no timestamp, or one the site did not sign;
@@ -87,11 +87,14 @@ back to the page the form was on — the `Referer`, when it is on this site, and
 otherwise — which is what an accepted form answers, so a bot believes it succeeded
 and does not try something cleverer.
 
-The body is read before routing, so it is read into memory and put back: collage's
-forgery check and the action read the request exactly as it arrived. `MaxBody`
-bounds what is read, by default 4 MiB, collage's own default limit on an action's
-body; a larger form body is refused with `413`. Raise it for a form that uploads
-large files.
+The plugin has no say in how large a submission may be. It checks the form in
+collage's `BeforeActionHook`, after the page's guards, the action's body limit and
+the forgery check, and reads it through that limit: a form that uploads large
+files needs only the action's `WithMaxBodyBytes`, and a body past it is the
+action's own `413`. The form is parsed once, and the handler finds it parsed.
+
+Only collage actions are checked. A form posted to a handler mounted with
+`app.Handle` is not, whatever `Protect` says.
 
 ## The decoy
 
@@ -161,8 +164,7 @@ matches.
     "maxAge": 86400,
     "silent": false,
     "protect": [],
-    "skip": ["/_collage/"],
-    "maxBody": 4194304
+    "skip": ["/_collage/"]
   }
 }
 ```
@@ -194,6 +196,19 @@ render.
   registered.
 
 ## Changes
+
+### v0.3.0
+
+- **The body is the action's to bound.** The plugin checks a submission in
+  collage's `BeforeActionHook` (collage v0.31.0), through the action's own body
+  limit, instead of reading it before routing through a limit of its own.
+  `MaxBody` is gone: a form that uploads large files needs only the action's
+  `WithMaxBodyBytes`. The form is parsed once, for the plugin and the handler.
+- The forgery check now runs before the plugin's, so a forged submission is
+  collage's `403`.
+- Only collage actions are checked; a form posted to an `app.Handle` handler is
+  not.
+- Requires collage v0.31.0.
 
 ### v0.2.0
 
