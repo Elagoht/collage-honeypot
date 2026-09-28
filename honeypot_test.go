@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -375,5 +376,59 @@ func TestMisconfiguration(t *testing.T) {
 				t.Error("the application was built")
 			}
 		})
+	}
+}
+
+// markerOf is the placeholder {{honeypot}} renders for key k.
+func markerOf(k []byte) string {
+	m := hmac.New(sha256.New, k)
+	m.Write([]byte("collage-honeypot:marker"))
+	return "collage-honeypot-" + hex.EncodeToString(m.Sum(nil))[:32]
+}
+
+// A handler of the application's own that writes a form without saying it is
+// HTML — net/http sniffs the type below the middleware — still has its
+// placeholder stamped. So does one that writes the status first, and one that
+// flushes before it writes.
+func TestUndeclaredHTML(t *testing.T) {
+	marker := markerOf(key)
+	page := `<!doctype html><html><body><form method="post"><input type="hidden" name="_hpt" value="` + marker + `"></form></body></html>`
+	handlers := map[string]http.HandlerFunc{
+		"/write": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, page)
+		},
+		"/status": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, page)
+		},
+		"/chunks": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, page[:20])
+			_, _ = io.WriteString(w, page[20:])
+		},
+	}
+	a, _ := app(t, honeypot.Options{Key: key}, nil)
+	for path, handler := range handlers {
+		if err := a.Handle(path, handler); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(a.Handler())
+	defer srv.Close()
+	for path := range handlers {
+		res, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if bytes.Contains(body, []byte(marker)) || !stampValue.Match(body) {
+			t.Errorf("%s: the placeholder went out unstamped:\n%s", path, body)
+		}
+		if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			t.Errorf("%s: Content-Type %q", path, ct)
+		}
+		if path == "/status" && res.StatusCode != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status %d", path, res.StatusCode)
+		}
 	}
 }

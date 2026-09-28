@@ -114,7 +114,7 @@ type Plugin struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.1.2" }
+func (p *Plugin) Version() string                { return "0.1.3" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
@@ -393,6 +393,12 @@ func (p *Plugin) mac(s string) []byte {
 // stampWriter holds back an HTML body to put the timestamp in place of the
 // placeholder. Anything else — an event stream, an image, JSON — passes straight
 // through, and so does a hijacked connection.
+//
+// A response is HTML when its Content-Type says so, or, when it has none, when
+// its first bytes look like HTML: net/http sniffs a missing type the same way,
+// below every middleware, so a handler that writes a form without declaring it
+// still sends one. Until those first bytes arrive, a status written without a
+// type is held back rather than decided on.
 type stampWriter struct {
 	http.ResponseWriter
 	plugin    *Plugin
@@ -403,33 +409,59 @@ type stampWriter struct {
 	body      bytes.Buffer
 }
 
-func (w *stampWriter) decide() {
+// decide settles whether the response is held back, from its Content-Type or,
+// when it has none, from first, the first bytes written. The sniffed type is
+// set on the response, so what net/http would have said is said here.
+func (w *stampWriter) decide(first []byte) {
 	if w.decided {
 		return
 	}
 	w.decided = true
-	w.buffering = strings.HasPrefix(w.Header().Get("Content-Type"), "text/html")
+	h := w.Header()
+	if _, declared := h["Content-Type"]; !declared && len(first) > 0 && h.Get("Content-Encoding") == "" {
+		h.Set("Content-Type", http.DetectContentType(first))
+	}
+	w.buffering = strings.HasPrefix(h.Get("Content-Type"), "text/html")
+	if !w.buffering && w.status != 0 {
+		w.ResponseWriter.WriteHeader(w.status)
+	}
 }
 
 func (w *stampWriter) WriteHeader(status int) {
-	w.decide()
-	if w.buffering {
-		w.status = status
+	// Informational: early hints, a protocol switch. Not the response itself.
+	if status < http.StatusOK {
+		w.ResponseWriter.WriteHeader(status)
 		return
 	}
-	w.ResponseWriter.WriteHeader(status)
+	if w.decided {
+		if !w.buffering {
+			w.ResponseWriter.WriteHeader(status)
+		} else if w.status == 0 {
+			w.status = status
+		}
+		return
+	}
+	if w.status == 0 {
+		w.status = status
+	}
+	if _, declared := w.Header()["Content-Type"]; declared {
+		w.decide(nil)
+	}
 }
 
 func (w *stampWriter) Write(b []byte) (int, error) {
-	w.decide()
+	w.decide(b)
 	if w.buffering {
 		return w.body.Write(b)
 	}
 	return w.ResponseWriter.Write(b)
 }
 
-// Flush passes a flush through when nothing is held back.
+// Flush passes a flush through when nothing is held back. A flush before
+// anything was written decides on the Content-Type alone: a handler that flushes
+// is streaming, and a stream is never held back.
 func (w *stampWriter) Flush() {
+	w.decide(nil)
 	if !w.buffering {
 		if f, ok := w.ResponseWriter.(http.Flusher); ok {
 			f.Flush()
@@ -442,6 +474,8 @@ func (w *stampWriter) Flush() {
 func (w *stampWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *stampWriter) finish() {
+	// Only a status was written, and nothing to sniff: it goes out as it was.
+	w.decide(nil)
 	if !w.buffering {
 		return
 	}

@@ -158,6 +158,13 @@ starting.
 
 ## Changes
 
+### v0.1.3
+
+- A response that writes HTML without a `Content-Type` — a handler mounted with
+  `app.Handle` writing `RenderPath` output, say — has its placeholder stamped.
+  The type is sniffed from the first bytes, as net/http does; before, such a
+  response went out with the placeholder, and its form was refused.
+
 ### v0.1.2
 
 - `collage.json`: the plugin described to editors — its template functions,
