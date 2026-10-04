@@ -21,7 +21,7 @@ app, err := collage.New(&collage.Config{
 </form>
 ```
 
-Requires collage v0.31.0 or later. Register it in `Config.Plugins`: it adds a
+Requires collage v0.43.0 or later. Register it in `Config.Plugins`: it adds a
 template function, which only a plugin registered there can.
 
 ## What is refused
@@ -124,19 +124,21 @@ stylesheet:
 A page with a form is usually cached, and a time rendered into it would be the
 time the cache was filled, handed to every reader. So `{{honeypot}}` renders a
 placeholder where the timestamp goes, and the cached page carries the placeholder.
-On the way out the plugin's middleware signs the current time with HMAC-SHA256 and
+On the way out the plugin signs the current time with HMAC-SHA256 and
 puts it in the placeholder's place — the way collage puts each reader's forgery
 token into a cached form. The placeholder is derived from the key, so a page cached
 by one process is recognised by the next, and nobody without the key can plant it
 in text a visitor wrote.
 
-A page given a timestamp is sent with `Cache-Control: private, no-cache` and no
-`ETag` (or `no-store`, when collage already said so): a browser cannot have an old
-copy confirmed by a `304`, and a CDN cannot hand one reader's time to everyone.
-Only HTML is held back to do this; an event stream, an image, a JSON document pass
-straight through.
+This is collage's `PersonaliseHook` (collage v0.43.0, which the plugin now
+requires): it runs after the page cache and inside every middleware, so before a
+compressor sees the body, and where the plugin is listed in `Config.Plugins` does
+not matter. A page given a timestamp is marked personal: collage answers it
+`private, no-store`, takes its `ETag` from the body sent, and never answers it
+`304`, so a browser cannot have an old copy confirmed and a CDN cannot hand one
+reader's time to everyone.
 
-A static build has no middleware to stand in for the placeholder, so there
+A static build has no request to stand in for the placeholder, so there
 `{{honeypot}}` renders the decoy without a timestamp.
 
 ## The key
@@ -191,11 +193,26 @@ render.
   not, fills the decoy.
 - A form built by JavaScript must include both fields: `new FormData(form)` does,
   a hand-built body does not.
-- Every HTML response is held in memory until it is complete, to find the
-  placeholder, so an HTML response cannot be streamed while the plugin is
-  registered.
+- Only what collage renders is stamped: a page, a fragment, an action's HTML
+  answer, an error page. A placeholder a hand-written `app.Handle` handler writes
+  itself goes out as it is.
 
 ## Changes
+
+### v0.4.0
+
+- **Fix: listed before elagoht/compress, every real submission was refused.** The
+  plugin's middleware held the response to replace the placeholder, and with a
+  compressor inside it what it held was gzip bytes: the placeholder was never
+  replaced and the timestamp was "not one the site signed". The timestamp now goes
+  in through collage's `PersonaliseHook`, after the page cache and before any
+  middleware compresses the body, so the order of `Config.Plugins` no longer
+  matters. The middleware is gone, and with it the buffering: an HTML response is
+  no longer held in memory.
+- A page with a timestamp is answered `private, no-store`, its `ETag` from the
+  body sent and never `304`, as collage answers any personal page.
+- A placeholder a hand-written `app.Handle` handler writes is no longer stamped.
+- Requires collage v0.43.0.
 
 ### v0.3.0
 

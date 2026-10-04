@@ -2,6 +2,7 @@ package honeypot_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -171,11 +172,17 @@ func TestTimestampSurvivesTheCache(t *testing.T) {
 	if first == second || strings.Contains(first, "collage-honeypot") {
 		t.Errorf("stamps %q and %q", first, second)
 	}
-	if rec.Header().Get("ETag") != "" || rec.Header().Get("Cache-Control") != "private, no-cache" {
-		t.Errorf("ETag %q, Cache-Control %q", rec.Header().Get("ETag"), rec.Header().Get("Cache-Control"))
+	// collage treats the page as personal: its ETag is of the body sent, which
+	// carries this reader's time, and no copy is ever confirmed by a 304.
+	if rec.Header().Get("Cache-Control") != "private, no-store" {
+		t.Errorf("Cache-Control %q", rec.Header().Get("Cache-Control"))
 	}
-	if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(rec.Body.Len()) {
-		t.Errorf("Content-Length %s for %d bytes", got, rec.Body.Len())
+	if etag := rec.Header().Get("ETag"); etag != "" {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("If-None-Match", etag)
+		if again := serve(h, r); again.Code != http.StatusOK {
+			t.Errorf("a returning reader's ETag: %d, want 200", again.Code)
+		}
 	}
 }
 
@@ -432,53 +439,6 @@ func markerOf(k []byte) string {
 	return "collage-honeypot-" + hex.EncodeToString(m.Sum(nil))[:32]
 }
 
-// A handler of the application's own that writes a form without saying it is
-// HTML — net/http sniffs the type below the middleware — still has its
-// placeholder stamped. So does one that writes the status first, and one that
-// flushes before it writes.
-func TestUndeclaredHTML(t *testing.T) {
-	marker := markerOf(key)
-	page := `<!doctype html><html><body><form method="post"><input type="hidden" name="_hpt" value="` + marker + `"></form></body></html>`
-	handlers := map[string]http.HandlerFunc{
-		"/write": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = io.WriteString(w, page)
-		},
-		"/status": func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			_, _ = io.WriteString(w, page)
-		},
-		"/chunks": func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = io.WriteString(w, page[:20])
-			_, _ = io.WriteString(w, page[20:])
-		},
-	}
-	a, _ := app(t, honeypot.Options{Key: key}, nil)
-	for path, handler := range handlers {
-		if err := a.Handle(path, handler); err != nil {
-			t.Fatal(err)
-		}
-	}
-	srv := httptest.NewServer(a.Handler())
-	defer srv.Close()
-	for path := range handlers {
-		res, err := http.Get(srv.URL + path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := io.ReadAll(res.Body)
-		res.Body.Close()
-		if bytes.Contains(body, []byte(marker)) || !stampValue.Match(body) {
-			t.Errorf("%s: the placeholder went out unstamped:\n%s", path, body)
-		}
-		if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-			t.Errorf("%s: Content-Type %q", path, ct)
-		}
-		if path == "/status" && res.StatusCode != http.StatusUnprocessableEntity {
-			t.Errorf("%s: status %d", path, res.StatusCode)
-		}
-	}
-}
-
 // signedWith makes a timestamp in the current format: the time, the delay its
 // form asked for in milliseconds, and an HMAC of both.
 func signedWith(k []byte, at time.Time, delayMS int) string {
@@ -662,5 +622,123 @@ func TestBadDelay(t *testing.T) {
 		if rec.Code == http.StatusOK && strings.Contains(rec.Body.String(), "_hpt") {
 			t.Errorf("%s rendered a form:\n%s", call, rec.Body.String())
 		}
+	}
+}
+
+// gzipPlugin stands in for a compressor: its middleware buffers a text/html
+// response and gzips it, so a plugin outside it sees only gzip bytes.
+type gzipPlugin struct{}
+
+func (gzipPlugin) Name() string                   { return "test/gzip" }
+func (gzipPlugin) Version() string                { return "0.0.0" }
+func (gzipPlugin) Shutdown(context.Context) error { return nil }
+func (gzipPlugin) Init(_ context.Context, host collage.Host) error {
+	return host.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			rec := httptest.NewRecorder()
+			next.ServeHTTP(rec, r)
+			h := w.Header()
+			for k, v := range rec.Header() {
+				h[k] = v
+			}
+			body := rec.Body.Bytes()
+			if strings.HasPrefix(h.Get("Content-Type"), "text/html") {
+				var buf bytes.Buffer
+				zw := gzip.NewWriter(&buf)
+				_, _ = zw.Write(body)
+				_ = zw.Close()
+				body = buf.Bytes()
+				h.Set("Content-Encoding", "gzip")
+				h.Set("Vary", "Accept-Encoding")
+				h.Del("Content-Length")
+			}
+			w.WriteHeader(rec.Code)
+			_, _ = w.Write(body)
+		})
+	})
+}
+
+// A compressor inside the plugin's middleware used to hand it gzip bytes, so the
+// placeholder was never replaced and every form was refused. The timestamp goes
+// in before any middleware sees the body, so the order of Plugins no longer matters.
+func TestPluginOrderDoesNotMatter(t *testing.T) {
+	orders := map[string]func(*honeypot.Plugin) []collage.Plugin{
+		"honeypot first": func(p *honeypot.Plugin) []collage.Plugin { return []collage.Plugin{p, gzipPlugin{}} },
+		"gzip first":     func(p *honeypot.Plugin) []collage.Plugin { return []collage.Plugin{gzipPlugin{}, p} },
+	}
+	for name, plugins := range orders {
+		t.Run(name, func(t *testing.T) {
+			a, err := collage.New(&collage.Config{
+				Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+				Template: collage.TemplateConfig{FS: fstest.MapFS{
+					"t/p.html": {Data: []byte(`<html><body><form method="post" action="/contact">{{honeypot}}<textarea name="message"></textarea></form></body></html>`)},
+				}, Root: "t"},
+				Cache:    collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
+				Security: collage.SecurityConfig{CSRFKey: key},
+				Plugins:  plugins(honeypot.New(honeypot.Options{Key: key})),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Static().Build()); err != nil {
+				t.Fatal(err)
+			}
+			got := &received{}
+			action := collage.NewAction("contact").WithPath("en", "/contact").WithMethods(http.MethodPost).WithoutCSRF().
+				WithHandler(func(_ context.Context, rc *collage.RenderContext) (*collage.ActionResult, error) {
+					got.add(rc.Request.FormValue("message"))
+					return collage.SeeOther("/thanks"), nil
+				}).Build()
+			if err := a.RegisterAction(action); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.Start(); err != nil {
+				t.Fatal(err)
+			}
+			h := a.Handler()
+			get := func() (string, *httptest.ResponseRecorder) {
+				r := httptest.NewRequest(http.MethodGet, "/", nil)
+				r.Header.Set("Accept-Encoding", "gzip")
+				rec := serve(h, r)
+				if rec.Header().Get("Content-Encoding") != "gzip" {
+					t.Fatalf("the page was not gzipped: %v", rec.Header())
+				}
+				zr, err := gzip.NewReader(rec.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				plain, err := io.ReadAll(zr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(plain), rec
+			}
+			first, rec := get()
+			if strings.Contains(first, markerOf(key)) {
+				t.Fatalf("the placeholder reached the reader:\n%s", first)
+			}
+			m := stampValue.FindStringSubmatch(first)
+			if m == nil {
+				t.Fatalf("the form carries no timestamp:\n%s", first)
+			}
+			if !strings.Contains(rec.Header().Get("Cache-Control"), "private") {
+				t.Errorf("Cache-Control %q", rec.Header().Get("Cache-Control"))
+			}
+			if res := post(h, form(m[1])); res.Code != http.StatusSeeOther {
+				t.Errorf("a real submission: %d, want 303", res.Code)
+			}
+			if got.last() != "hello" {
+				t.Errorf("the handler saw %q", got.last())
+			}
+			time.Sleep(5 * time.Millisecond)
+			second, _ := get()
+			if m2 := stampValue.FindStringSubmatch(second); m2 == nil || m2[1] == m[1] {
+				t.Errorf("two reads of a cached page share a timestamp: %q", m[1])
+			}
+		})
 	}
 }

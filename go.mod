@@ -5,4 +5,4 @@ module github.com/Elagoht/collage-honeypot
 
 go 1.26
 
-require github.com/Elagoht/collage v0.31.0
+require github.com/Elagoht/collage v0.43.0

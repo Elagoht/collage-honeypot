@@ -33,9 +33,11 @@
 // A page with a form is usually cached, and a timestamp rendered into it would
 // be the time the cache was filled, handed to every reader. So {{honeypot}}
 // renders a placeholder where the timestamp goes, and the cached page carries the
-// placeholder; the plugin's middleware signs the time the response leaves and
+// placeholder; the plugin signs the time the response leaves and
 // puts it in the placeholder's place — the way collage itself puts each reader's
-// forgery token into a cached form.
+// forgery token into a cached form. That is collage's PersonaliseHook, which runs
+// before any middleware compresses the body, so where the plugin is listed does
+// not matter. It needs collage v0.43.0.
 package honeypot
 
 import (
@@ -170,7 +172,7 @@ func (l *learned) add(path string) (filled bool) {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.3.0" }
+func (p *Plugin) Version() string                { return "0.4.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
@@ -253,12 +255,12 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	})
 }
 
-// Init wraps every request, to give the forms served their timestamp.
-func (p *Plugin) Init(_ context.Context, host collage.Host) error {
+// Init checks that Configure has run, which {{honeypot}} needs.
+func (p *Plugin) Init(_ context.Context, _ collage.Host) error {
 	if p.marker == "" {
 		return errors.New("honeypot: register the plugin in Config.Plugins, where Configure runs; {{honeypot}} needs it")
 	}
-	return host.Use(p.middleware)
+	return nil
 }
 
 // OnBeforeRender marks a static build's render: no middleware will stand in for
@@ -291,16 +293,6 @@ func (p *Plugin) fields(static bool, delay int) template.HTML {
 		placeholder += "-" + strconv.Itoa(delay)
 	}
 	return template.HTML(decoy + `<input type="hidden" name="` + TimeField + `" value="` + placeholder + `">`)
-}
-
-// middleware gives the forms served their timestamp. Submissions are checked in
-// OnBeforeAction, where the body has the action's own limit.
-func (p *Plugin) middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sw := &stampWriter{ResponseWriter: w, plugin: p, request: r, head: r.Method == http.MethodHead}
-		next.ServeHTTP(sw, r)
-		sw.finish()
-	})
 }
 
 // checks reports whether r is a form submission the plugin checks.
@@ -382,7 +374,7 @@ func (p *Plugin) inspect(form url.Values) string {
 	if !ok {
 		return "the timestamp is not one the site signed"
 	}
-	age := time.Now().Sub(served)
+	age := time.Since(served)
 	switch {
 	case age < -time.Minute:
 		return "the timestamp is in the future"
@@ -471,121 +463,26 @@ func (p *Plugin) mac(s string) []byte {
 	return m.Sum(nil)
 }
 
-// stampWriter holds back an HTML body to put the timestamp in place of the
-// placeholder. Anything else — an event stream, an image, JSON — passes straight
-// through, and so does a hijacked connection.
-//
-// A response is HTML when its Content-Type says so, or, when it has none, when
-// its first bytes look like HTML: net/http sniffs a missing type the same way,
-// below every middleware, so a handler that writes a form without declaring it
-// still sends one. Until those first bytes arrive, a status written without a
-// type is held back rather than decided on.
-type stampWriter struct {
-	http.ResponseWriter
-	plugin    *Plugin
-	request   *http.Request
-	head      bool
-	status    int
-	buffering bool
-	decided   bool
-	body      bytes.Buffer
+// OnPersonalise signs the time this response leaves and puts it in the
+// placeholder's place, and learns the path each placeholder's form posts to. It
+// runs after collage's page cache and inside every middleware, so before a
+// compressor: the order plugins are listed in does not matter. The page is
+// marked personal, so collage computes its ETag from the body sent, never
+// answers it 304, and keeps a shared cache from handing one reader's time to
+// the next.
+func (p *Plugin) OnPersonalise(_ context.Context, ev *collage.PersonaliseEvent) error {
+	if body, ok := p.stampAll(ev.Request, ev.Body); ok {
+		ev.Body = body
+		ev.Personal = true
+	}
+	return nil
 }
 
-// decide settles whether the response is held back, from its Content-Type or,
-// when it has none, from first, the first bytes written. The sniffed type is
-// set on the response, so what net/http would have said is said here.
-func (w *stampWriter) decide(first []byte) {
-	if w.decided {
-		return
-	}
-	w.decided = true
-	h := w.Header()
-	if _, declared := h["Content-Type"]; !declared && len(first) > 0 && h.Get("Content-Encoding") == "" {
-		h.Set("Content-Type", http.DetectContentType(first))
-	}
-	w.buffering = strings.HasPrefix(h.Get("Content-Type"), "text/html")
-	if !w.buffering && w.status != 0 {
-		w.ResponseWriter.WriteHeader(w.status)
-	}
-}
+var _ collage.PersonaliseHook = (*Plugin)(nil)
 
-func (w *stampWriter) WriteHeader(status int) {
-	// Informational: early hints, a protocol switch. Not the response itself.
-	if status < http.StatusOK {
-		w.ResponseWriter.WriteHeader(status)
-		return
-	}
-	if w.decided {
-		if !w.buffering {
-			w.ResponseWriter.WriteHeader(status)
-		} else if w.status == 0 {
-			w.status = status
-		}
-		return
-	}
-	if w.status == 0 {
-		w.status = status
-	}
-	if _, declared := w.Header()["Content-Type"]; declared {
-		w.decide(nil)
-	}
-}
-
-func (w *stampWriter) Write(b []byte) (int, error) {
-	w.decide(b)
-	if w.buffering {
-		return w.body.Write(b)
-	}
-	return w.ResponseWriter.Write(b)
-}
-
-// Flush passes a flush through when nothing is held back. A flush before
-// anything was written decides on the Content-Type alone: a handler that flushes
-// is streaming, and a stream is never held back.
-func (w *stampWriter) Flush() {
-	w.decide(nil)
-	if !w.buffering {
-		if f, ok := w.ResponseWriter.(http.Flusher); ok {
-			f.Flush()
-		}
-	}
-}
-
-// Unwrap lets http.ResponseController reach the connection: a stream's write
-// deadline, a WebSocket's hijack.
-func (w *stampWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-func (w *stampWriter) finish() {
-	// Only a status was written, and nothing to sniff: it goes out as it was.
-	w.decide(nil)
-	if !w.buffering {
-		return
-	}
-	body := w.body.Bytes()
-	if stamped, ok := w.plugin.stampAll(w.request, body); ok {
-		body = stamped
-		h := w.Header()
-		// The page now carries this response's time. Without an ETag a browser
-		// cannot have it confirmed by a 304 and keep an old copy; private keeps
-		// a shared cache from handing one reader's time to the next.
-		h.Del("ETag")
-		if !strings.Contains(h.Get("Cache-Control"), "no-store") {
-			h.Set("Cache-Control", "private, no-cache")
-		}
-	}
-	if !w.head {
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	}
-	status := w.status
-	if status == 0 {
-		status = http.StatusOK
-	}
-	w.ResponseWriter.WriteHeader(status)
-	_, _ = w.ResponseWriter.Write(body)
-}
-
-// stampAll puts a timestamp in place of every placeholder in body, and learns the
-// path each placeholder's form posts to. It reports whether there was any.
+// stampAll returns a copy of body with a timestamp in place of every
+// placeholder. It reports whether there was any; body itself is never written to,
+// it may be the cache's.
 func (p *Plugin) stampAll(r *http.Request, body []byte) ([]byte, bool) {
 	marker := []byte(p.marker)
 	if !bytes.Contains(body, marker) {
