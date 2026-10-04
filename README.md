@@ -195,7 +195,9 @@ render.
   a hand-built body does not.
 - Only what collage renders is stamped: a page, a fragment, an action's HTML
   answer, an error page. A placeholder a hand-written `app.Handle` handler writes
-  itself goes out as it is.
+  itself goes out as it is, unstamped. A form carrying it that posts to a collage action is refused if the
+  action's path is protected (named in `Protect`, or learned from another form), and otherwise
+  not checked at all; list such a path in `Protect`.
 
 ## Changes
 

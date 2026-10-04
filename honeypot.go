@@ -177,7 +177,7 @@ func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
-// staticKey marks a render for a static build, which no middleware follows.
+// staticKey marks a render for a static build, which no personalise hook follows.
 const staticKey = Name + ":static"
 
 // Configure reads and checks the configuration and adds {{honeypot}}.
@@ -190,7 +190,7 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	if o.KeyHex != "" {
 		key, err := hex.DecodeString(o.KeyHex)
 		if err != nil {
-			return fmt.Errorf("honeypot: key: %w", err)
+			return errors.New("honeypot: key is not valid hex")
 		}
 		o.Key = key
 	}
@@ -263,7 +263,7 @@ func (p *Plugin) Init(_ context.Context, _ collage.Host) error {
 	return nil
 }
 
-// OnBeforeRender marks a static build's render: no middleware will stand in for
+// OnBeforeRender marks a static build's render: no request will stand in for
 // the placeholder, so {{honeypot}} leaves the timestamp out.
 func (p *Plugin) OnBeforeRender(_ context.Context, ev *collage.BeforeRenderEvent) error {
 	if ev.Static && ev.Context != nil {

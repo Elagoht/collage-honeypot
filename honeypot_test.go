@@ -177,12 +177,29 @@ func TestTimestampSurvivesTheCache(t *testing.T) {
 	if rec.Header().Get("Cache-Control") != "private, no-store" {
 		t.Errorf("Cache-Control %q", rec.Header().Get("Cache-Control"))
 	}
-	if etag := rec.Header().Get("ETag"); etag != "" {
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
-		r.Header.Set("If-None-Match", etag)
-		if again := serve(h, r); again.Code != http.StatusOK {
-			t.Errorf("a returning reader's ETag: %d, want 200", again.Code)
-		}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("the response has no ETag")
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("If-None-Match", etag)
+	if again := serve(h, r); again.Code != http.StatusOK {
+		t.Errorf("a returning reader's ETag: %d, want 200", again.Code)
+	}
+}
+
+// A key that is not hex is refused without a byte of it in the message.
+func TestBadHexKeyErrorHidesTheKey(t *testing.T) {
+	_, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`{{honeypot}}`)}}, Root: "t"},
+		Plugins:  []collage.Plugin{honeypot.New(honeypot.Options{KeyHex: "qqqq"})},
+	})
+	if err == nil {
+		t.Fatal("the application was built")
+	}
+	if !strings.Contains(err.Error(), "key is not valid hex") || strings.Contains(err.Error(), "q") {
+		t.Errorf("err = %q", err)
 	}
 }
 
