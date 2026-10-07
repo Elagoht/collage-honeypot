@@ -21,7 +21,7 @@ app, err := collage.New(&collage.Config{
 </form>
 ```
 
-Requires collage v0.43.0 or later. Register it in `Config.Plugins`: it adds a
+Requires collage v0.50.0 or later. Register it in `Config.Plugins`: it adds a
 template function, which only a plugin registered there can.
 
 ## What is refused
@@ -200,6 +200,12 @@ render.
   not checked at all; list such a path in `Protect`.
 
 ## Changes
+
+### v0.4.2
+
+- v0.4.1 was tagged at v0.4.0's commit by mistake and is retracted.
+- Requires collage v0.50.0. A static build's render is marked through a typed
+  key, and the configuration is read with `collage.PluginConfig`.
 
 ### v0.4.0
 

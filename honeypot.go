@@ -172,17 +172,18 @@ func (l *learned) add(path string) (filled bool) {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.4.0" }
+func (p *Plugin) Version() string                { return "0.4.2" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
 // staticKey marks a render for a static build, which no personalise hook follows.
-const staticKey = Name + ":static"
+var staticKey = collage.NewKey[bool](Name + ":static")
 
 // Configure reads and checks the configuration and adds {{honeypot}}.
 func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
-	if err := host.Config(&p.opts); err != nil {
+	var err error
+	if p.opts, err = collage.PluginConfig(host, p.opts); err != nil {
 		return err
 	}
 	p.log = host.Logger()
@@ -249,7 +250,7 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 			case len(delay) == 1:
 				ms = int(delay[0] * 1000)
 			}
-			static, _ := collage.Get[bool](rc, staticKey)
+			static, _ := staticKey.Get(rc)
 			return p.fields(static, ms), nil
 		}
 	})
@@ -267,7 +268,7 @@ func (p *Plugin) Init(_ context.Context, _ collage.Host) error {
 // the placeholder, so {{honeypot}} leaves the timestamp out.
 func (p *Plugin) OnBeforeRender(_ context.Context, ev *collage.BeforeRenderEvent) error {
 	if ev.Static && ev.Context != nil {
-		ev.Context.Set(staticKey, true)
+		staticKey.Set(ev.Context, true)
 	}
 	return nil
 }
