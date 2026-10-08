@@ -172,7 +172,7 @@ func (l *learned) add(path string) (filled bool) {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.4.2" }
+func (p *Plugin) Version() string                { return "0.4.3" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
@@ -341,7 +341,8 @@ func cleanPath(p string) string {
 // OnBeforeAction checks a submission to an action, after collage has put the
 // action's body limit on it and checked its forgery token. The form is read
 // through that limit and stays parsed for the handler; a body past it is the
-// action's 413, not the plugin's.
+// action's 413, not the plugin's. A streaming action (WithStreamingBody) has no
+// form to read, and passes unchecked.
 func (p *Plugin) OnBeforeAction(_ context.Context, ev *collage.BeforeActionEvent) error {
 	r := ev.Request
 	if !p.checks(r) {
@@ -349,6 +350,11 @@ func (p *Plugin) OnBeforeAction(_ context.Context, ev *collage.BeforeActionEvent
 	}
 	form, err := ev.Form()
 	if err != nil {
+		if errors.Is(err, collage.ErrStreamingBody) {
+			// A streaming action's form cannot be read without consuming the
+			// upload: nothing to check, and nothing worth a line per upload.
+			return nil
+		}
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			return err

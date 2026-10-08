@@ -759,3 +759,49 @@ func TestPluginOrderDoesNotMatter(t *testing.T) {
 		})
 	}
 }
+
+// A streaming action's body is the handler's: honeypot cannot inspect its form
+// without consuming the upload, so the request passes unchecked, intact.
+func TestStreamingActionPasses(t *testing.T) {
+	for name, silent := range map[string]bool{"refusing": false, "silent": true} {
+		t.Run(name, func(t *testing.T) {
+			a, err := collage.New(&collage.Config{
+				Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+				Template: collage.TemplateConfig{FS: fstest.MapFS{
+					"t/p.html": {Data: []byte(`<p>hi</p>`)},
+				}, Root: "t"},
+				Plugins: []collage.Plugin{honeypot.New(honeypot.Options{Key: key, Protect: []string{"/upload"}, Silent: silent})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.RegisterPage(collage.NewPage("p").WithContent(collage.NewFragment("p", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
+				t.Fatal(err)
+			}
+			var read string
+			action := collage.NewAction("upload").WithPath("en", "/upload").WithMethods(http.MethodPost).
+				WithoutCSRF().WithStreamingBody().WithMaxBodyBytes(8 << 20).
+				WithHandler(func(_ context.Context, rc *collage.RenderContext) (*collage.ActionResult, error) {
+					b, err := io.ReadAll(rc.Request.Body)
+					if err != nil {
+						return nil, err
+					}
+					read = string(b)
+					return &collage.ActionResult{Status: http.StatusCreated, ContentType: "text/plain; charset=utf-8", Body: []byte("ok")}, nil
+				}).Build()
+			if err := a.RegisterAction(action); err != nil {
+				t.Fatal(err)
+			}
+			body := "message=" + strings.Repeat("x", 1<<20)
+			r := httptest.NewRequest(http.MethodPost, "/upload", strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := serve(a.Handler(), r)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status %d, want 201: %s", rec.Code, rec.Body.String())
+			}
+			if read != body {
+				t.Errorf("the handler read %d bytes, want %d", len(read), len(body))
+			}
+		})
+	}
+}

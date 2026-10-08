@@ -21,7 +21,7 @@ app, err := collage.New(&collage.Config{
 </form>
 ```
 
-Requires collage v0.50.0 or later. Register it in `Config.Plugins`: it adds a
+Requires collage v0.57.0 or later. Register it in `Config.Plugins`: it adds a
 template function, which only a plugin registered there can.
 
 ## What is refused
@@ -38,6 +38,12 @@ protected path is checked before the action's handler runs, and refused when:
 
 Any other body — a JSON API, a `fetch` sending JSON — passes unchecked, and so
 does every `GET`.
+
+An action declared with `WithStreamingBody()` passes unchecked too: its form
+cannot be inspected without consuming the upload, so `Form()` returns
+`collage.ErrStreamingBody` and the plugin lets the request through, logging
+nothing. Protect a streaming upload action with a guard or authentication and
+rate limiting instead.
 
 ## Which paths are protected
 
@@ -200,6 +206,13 @@ render.
   not checked at all; list such a path in `Protect`.
 
 ## Changes
+
+### v0.4.3
+
+- A streaming action (`WithStreamingBody()`) passes unchecked. Before, its
+  `Form()` error was taken for an unparsable form, and every streaming upload on
+  a protected path was refused with 400, or, with `Silent`, silently dropped.
+- Requires collage v0.57.0.
 
 ### v0.4.2
 
