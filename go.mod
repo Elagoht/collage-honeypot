@@ -5,6 +5,6 @@ module github.com/Elagoht/collage-honeypot
 
 go 1.26
 
-require github.com/Elagoht/collage v0.61.0
+require github.com/Elagoht/collage v0.61.2
 
 retract v0.4.1 // tagged at v0.4.0's commit by mistake
