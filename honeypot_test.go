@@ -406,11 +406,7 @@ func TestConfiguration(t *testing.T) {
 func TestStaticBuild(t *testing.T) {
 	a, _ := app(t, honeypot.Options{Key: key}, nil)
 	out := t.TempDir()
-	b, err := collage.NewBuilder(a, collage.BuildOptions{OutDir: out})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Build(context.Background()); err != nil {
+	if _, err := collage.Build(context.Background(), a, collage.BuildOptions{OutDir: out}); err != nil {
 		t.Fatal(err)
 	}
 	var html []byte
