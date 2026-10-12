@@ -3,7 +3,7 @@
 // form was open.
 //
 //	app, err := collage.New(&collage.Config{
-//		Plugins: []collage.Plugin{honeypot.New(honeypot.Options{Key: key})},
+//		Plugins: []collage.Plugin{honeypot.New(honeypot.Options{KeyEnv: "HONEYPOT_KEY"})},
 //	})
 //
 // and inside every form the site accepts:
@@ -56,6 +56,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"strconv"
@@ -74,25 +75,25 @@ const TimeField = "_hpt"
 
 // Options configures the plugin.
 type Options struct {
-	// Key signs the timestamp: at least 32 random bytes, the same on every
-	// instance and across restarts. Unset, one is generated per process, and a
-	// form served before a restart, or by another instance, is refused. In
-	// configuration it is "key", hex-encoded.
+	// KeyEnv names the environment variable holding the signing key,
+	// hex-encoded: at least 32 random bytes, the same on every instance and
+	// across restarts. When set, it wins over Key, and an empty or non-hex
+	// variable is an error. With neither, a key is generated per process, and a
+	// form served before a restart, or by another instance, is refused.
+	KeyEnv string `json:"keyEnv"`
+	// Key is the signing key itself, set from Go.
 	Key []byte `json:"-"`
-	// KeyHex is Key, hex-encoded, as configuration carries it.
-	KeyHex string `json:"key"`
 	// Field is the decoy's name: something a bot is keen to fill in. Default
 	// "website".
 	Field string `json:"field"`
-	// MinDelay is how many seconds a form must be open before it is sent, for a
+	// MinDelay is how long a form must be open before it is sent, "2s", for a
 	// form that does not choose its own with {{honeypot seconds}}. It catches a
 	// script that fetches a form and posts it back at once. Default 0: off, since
 	// a person with autofill and Enter is fast, and a script that knows the delay
 	// only has to wait it out.
-	MinDelay float64 `json:"minDelay"`
-	// MaxAge is how many seconds a served form stays good for. Default 86400,
-	// one day.
-	MaxAge int `json:"maxAge"`
+	MinDelay collage.Duration `json:"minDelay"`
+	// MaxAge is how long a served form stays good for. Default "24h".
+	MaxAge collage.Duration `json:"maxAge"`
 	// Silent answers a refused submission with 303 See Other to the page it came
 	// from, as an accepted form is answered, so a bot believes it succeeded and
 	// does not try another way. Default false: 400 Bad Request.
@@ -172,7 +173,7 @@ func (l *learned) add(path string) (filled bool) {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.4.4" }
+func (p *Plugin) Version() string                { return "0.5.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
@@ -188,10 +189,14 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	}
 	p.log = host.Logger()
 	o := &p.opts
-	if o.KeyHex != "" {
-		key, err := hex.DecodeString(o.KeyHex)
+	if o.KeyEnv != "" {
+		raw := os.Getenv(o.KeyEnv)
+		if raw == "" {
+			return fmt.Errorf("honeypot: the environment variable %s is empty", o.KeyEnv)
+		}
+		key, err := hex.DecodeString(raw)
 		if err != nil {
-			return errors.New("honeypot: key is not valid hex")
+			return fmt.Errorf("honeypot: the environment variable %s is not valid hex", o.KeyEnv)
 		}
 		o.Key = key
 	}
@@ -210,20 +215,16 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	if !fieldName.MatchString(o.Field) || o.Field == TimeField {
 		return fmt.Errorf("honeypot: field %q must be a plain name: letters, digits, - and _", o.Field)
 	}
-	// -1 was how the check was turned off before 0 was; it still is.
-	switch {
-	case o.MinDelay == -1:
-		o.MinDelay = 0
-	case o.MinDelay < 0:
-		return errors.New("honeypot: minDelay is seconds, or 0 to turn the check off")
+	if o.MinDelay < 0 {
+		return errors.New("honeypot: minDelay cannot be negative; 0 turns the check off")
 	}
 	if o.MaxAge < 0 {
 		return errors.New("honeypot: maxAge cannot be negative")
 	}
 	if o.MaxAge == 0 {
-		o.MaxAge = 86400
+		o.MaxAge = collage.Duration(24 * time.Hour)
 	}
-	if o.MinDelay > 0 && o.MinDelay >= float64(o.MaxAge) {
+	if o.MinDelay > 0 && o.MinDelay >= o.MaxAge {
 		return errors.New("honeypot: minDelay must be shorter than maxAge, or no form could be sent")
 	}
 	if o.Skip == nil {
@@ -245,7 +246,7 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 			switch {
 			case len(delay) > 1:
 				return "", errors.New("honeypot: {{honeypot}} takes one delay in seconds, or none")
-			case len(delay) == 1 && (delay[0] < 0 || delay[0] >= float64(p.opts.MaxAge)):
+			case len(delay) == 1 && (delay[0] < 0 || delay[0] >= time.Duration(p.opts.MaxAge).Seconds()):
 				return "", fmt.Errorf("honeypot: a delay of %g seconds: it must be 0 or more, and shorter than maxAge", delay[0])
 			case len(delay) == 1:
 				ms = int(delay[0] * 1000)
@@ -387,7 +388,7 @@ func (p *Plugin) inspect(form url.Values) string {
 		return "the timestamp is in the future"
 	case age < delay:
 		return "the form was sent too soon after it was served"
-	case age > time.Duration(p.opts.MaxAge)*time.Second:
+	case age > time.Duration(p.opts.MaxAge):
 		return "the form was served too long ago"
 	}
 	return ""
@@ -453,7 +454,7 @@ func (p *Plugin) verify(stamp string) (time.Time, time.Duration, bool) {
 	if err != nil {
 		return time.Time{}, 0, false
 	}
-	delay := time.Duration(p.opts.MinDelay * float64(time.Second))
+	delay := time.Duration(p.opts.MinDelay)
 	if d != "" {
 		dn, err := strconv.Atoi(d)
 		if err != nil || dn < 0 {
@@ -496,7 +497,7 @@ func (p *Plugin) stampAll(r *http.Request, body []byte) ([]byte, bool) {
 		return body, false
 	}
 	now := time.Now()
-	defaultDelay := int(p.opts.MinDelay * 1000)
+	defaultDelay := int(time.Duration(p.opts.MinDelay).Milliseconds())
 	out := make([]byte, 0, len(body)+64)
 	rest := 0
 	for {

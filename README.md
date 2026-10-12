@@ -8,7 +8,7 @@ nothing in the configuration has to name the forms.
 
 ```go
 app, err := collage.New(&collage.Config{
-	Plugins: []collage.Plugin{honeypot.New(honeypot.Options{Key: key})},
+	Plugins: []collage.Plugin{honeypot.New(honeypot.Options{KeyEnv: "HONEYPOT_KEY"})},
 })
 ```
 
@@ -21,7 +21,7 @@ app, err := collage.New(&collage.Config{
 </form>
 ```
 
-Requires collage v0.57.0 or later. Register it in `Config.Plugins`: it adds a
+Requires collage v0.61.0 or later. Register it in `Config.Plugins`: it adds a
 template function, which only a plugin registered there can.
 
 ## What is refused
@@ -32,7 +32,7 @@ protected path is checked before the action's handler runs, and refused when:
 
 - the decoy field was filled in;
 - it carries no timestamp, or one the site did not sign;
-- the page was served more than `MaxAge` seconds ago (default one day);
+- the page was served more than `MaxAge` ago (default `"24h"`);
 - it came back sooner than the form's delay after the page was served, when there
   is one: see [The delay](#the-delay).
 
@@ -76,7 +76,8 @@ A form whose button carries its own `formaction` is learned by the form's
 By default a form may be sent back at once. A delay catches a script that fetches
 the form and posts it back in the same breath, but a person with the browser's
 autofill and Enter is fast too, and a script that knows the delay only has to wait
-it out. A form that wants one asks for it in seconds:
+it out. A form that wants one asks for it in seconds — the template's argument is a
+number of seconds, `MinDelay` in configuration a duration string:
 
 ```html
 {{honeypot 0.3}}
@@ -150,10 +151,12 @@ A static build has no request to stand in for the placeholder, so there
 ## The key
 
 Set a key of at least 32 random bytes, the same on every instance and across
-restarts — `openssl rand -hex 32` makes one:
+restarts — `openssl rand -hex 32` makes one. The key never goes in
+`plugins-config.json`: `keyEnv` names the environment variable that holds it,
+hex-encoded, and from Go `Options.Key` takes the bytes themselves.
 
 ```json
-{ "elagoht/honeypot": { "key": "9f2c…" } }
+{ "elagoht/honeypot": { "keyEnv": "HONEYPOT_KEY" } }
 ```
 
 Without one, a key is generated per process and a warning logged: a form served
@@ -166,10 +169,10 @@ matches.
 ```json
 {
   "elagoht/honeypot": {
-    "key": "hex-encoded, 32 bytes or more",
+    "keyEnv": "HONEYPOT_KEY",
     "field": "website",
-    "minDelay": 0,
-    "maxAge": 86400,
+    "minDelay": "0s",
+    "maxAge": "24h",
     "silent": false,
     "protect": [],
     "skip": ["/_collage/"]
@@ -177,10 +180,12 @@ matches.
 }
 ```
 
-`minDelay` is seconds and may be fractional; `0`, the default, turns the check
-off, as `-1` did before v0.2.0 and still does. A key that is short or not hex, a
-field that is not a plain name, a `minDelay` not shorter than `maxAge`, a prefix
-without a leading `/` — each stops the application from starting. A delay
+`minDelay` and `maxAge` are durations as Go writes them, `"300ms"`, `"24h"`; a
+bare number is an error. A `minDelay` of `"0s"`, the default, turns the check off;
+a negative one is an error. A `keyEnv` variable that is empty or not hex, a key
+that is short, a field that is not a plain name, a `minDelay` not shorter than
+`maxAge`, a prefix without a leading `/` — each stops the application from
+starting. A delay
 `{{honeypot}}` cannot keep, negative or not shorter than `maxAge`, fails the
 render.
 
@@ -206,6 +211,20 @@ render.
   not checked at all; list such a path in `Protect`.
 
 ## Changes
+
+### v0.5.0
+
+Changed in v0.5.0 — an old key now stops the application at start, naming the
+key:
+
+| Was | Now |
+| --- | --- |
+| `key` (hex) / `Options.KeyHex` | `keyEnv`, the name of an environment variable holding the hex key; `Options.Key` (bytes) is Go-only |
+| `maxAge: 86400` (seconds, `int`) | `maxAge: "24h"` (`collage.Duration`) |
+| `minDelay: 0.3` (seconds, `float64`) | `minDelay: "300ms"` (`collage.Duration`); `{{honeypot 0.3}}` still takes seconds |
+| `minDelay: -1` (off) | an error; `"0s"`, the default, is off |
+
+- Requires collage v0.61.0.
 
 ### v0.4.3
 

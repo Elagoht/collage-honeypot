@@ -26,6 +26,7 @@ import (
 
 	honeypot "github.com/Elagoht/collage-honeypot"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
 var key = bytes.Repeat([]byte("k"), 32)
@@ -61,24 +62,6 @@ func appWith(t *testing.T, opts honeypot.Options, config map[string]json.RawMess
 	if csrf {
 		token = "{{csrfToken}}"
 	}
-	a, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<html><body><form method="post" action="/contact">{{honeypot}}` + token + `<textarea name="message"></textarea></form></body></html>`)},
-		}, Root: "t"},
-		Cache:        collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		Security:     collage.SecurityConfig{CSRFKey: key},
-		Plugins:      []collage.Plugin{honeypot.New(opts)},
-		PluginConfig: config,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Static, so the form is served from the cache: the timestamp has to survive
-	// that.
-	if err := a.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Static().Build()); err != nil {
-		t.Fatal(err)
-	}
 	got := &received{}
 	builder := collage.NewAction("contact").WithPath("en", "/contact").WithMethods(http.MethodPost)
 	if !csrf {
@@ -89,10 +72,26 @@ func appWith(t *testing.T, opts honeypot.Options, config map[string]json.RawMess
 			got.add(rc.Request.FormValue("message"))
 			return collage.SeeOther("/thanks"), nil
 		}).Build()
-	if err := a.RegisterAction(action); err != nil {
-		t.Fatal(err)
-	}
-	return a, got
+	site := collagetest.NewSite(t,
+		collagetest.WithPlugins(honeypot.New(opts)),
+		collagetest.WithoutHome(),
+		collagetest.WithTemplates(map[string]string{
+			"p.html": `<html><body><form method="post" action="/contact">{{honeypot}}` + token + `<textarea name="message"></textarea></form></body></html>`,
+		}),
+		// Static, so the form is served from the cache: the timestamp has to
+		// survive that.
+		collagetest.WithRegister(
+			collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Static().Build(),
+			action),
+		collagetest.WithConfig(func(c *collage.Config) {
+			c.Cache = collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour}
+			c.Security = collage.SecurityConfig{CSRFKey: key}
+			if config != nil {
+				c.PluginConfig = config
+			}
+		}),
+	)
+	return site.App, got
 }
 
 // site is the app's handler, with the form served once, so the path it posts to
@@ -190,21 +189,37 @@ func TestTimestampSurvivesTheCache(t *testing.T) {
 
 // A key that is not hex is refused without a byte of it in the message.
 func TestBadHexKeyErrorHidesTheKey(t *testing.T) {
-	_, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`{{honeypot}}`)}}, Root: "t"},
-		Plugins:  []collage.Plugin{honeypot.New(honeypot.Options{KeyHex: "qqqq"})},
-	})
+	t.Setenv("TEST_HONEYPOT_KEY", "qqqq")
+	_, err := collagetest.TrySite(t, collagetest.WithPlugins(honeypot.New(honeypot.Options{KeyEnv: "TEST_HONEYPOT_KEY"})))
 	if err == nil {
 		t.Fatal("the application was built")
 	}
-	if !strings.Contains(err.Error(), "key is not valid hex") || strings.Contains(err.Error(), "q") {
+	if !strings.Contains(err.Error(), "TEST_HONEYPOT_KEY is not valid hex") || strings.Contains(err.Error(), "qqqq") {
 		t.Errorf("err = %q", err)
 	}
 }
 
+// The keys v0.5.0 renamed or retyped stop the application, by name: the key is
+// no longer read from the file, and durations are strings.
+func TestOldKeysFail(t *testing.T) {
+	for name, raw := range map[string]string{
+		"key":      `{"key": "` + hex.EncodeToString(key) + `"}`,
+		"maxAge":   `{"maxAge": 86400}`,
+		"minDelay": `{"minDelay": -1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := collagetest.TrySite(t,
+				collagetest.WithPlugins(honeypot.New(honeypot.Options{Key: key})),
+				collagetest.WithPluginConfig(honeypot.Name, raw))
+			if err == nil || !strings.Contains(err.Error(), `"`+name+`"`) {
+				t.Errorf("start = %v, want an error naming %q", err, name)
+			}
+		})
+	}
+}
+
 func TestSubmissions(t *testing.T) {
-	h, got := site(t, honeypot.Options{Key: key, MinDelay: 0.05})
+	h, got := site(t, honeypot.Options{Key: key, MinDelay: collage.Duration(50 * time.Millisecond)})
 	stamp := stampOf(t, h)
 
 	if rec := post(h, form(stamp)); rec.Code != http.StatusBadRequest {
@@ -240,7 +255,7 @@ func TestSubmissions(t *testing.T) {
 // The body read to check it is put back, so collage's own forgery check still
 // finds its token in it.
 func TestForgeryCheckStillReadsTheBody(t *testing.T) {
-	a, got := appWith(t, honeypot.Options{Key: key, MinDelay: -1}, nil, true)
+	a, got := appWith(t, honeypot.Options{Key: key}, nil, true)
 	h := a.Handler()
 	page := serve(h, httptest.NewRequest(http.MethodGet, "/", nil))
 	token := regexp.MustCompile(`name="_csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
@@ -262,7 +277,7 @@ func TestForgeryCheckStillReadsTheBody(t *testing.T) {
 
 // Multipart bodies are checked, and put back for the action as well.
 func TestMultipart(t *testing.T) {
-	h, got := site(t, honeypot.Options{Key: key, MinDelay: -1})
+	h, got := site(t, honeypot.Options{Key: key})
 	send := func(stamp string) *httptest.ResponseRecorder {
 		var buf bytes.Buffer
 		mw := multipart.NewWriter(&buf)
@@ -386,15 +401,16 @@ func TestTheActionBoundsTheBody(t *testing.T) {
 
 // Configuration overlays the options, the key included.
 func TestConfiguration(t *testing.T) {
+	t.Setenv("TEST_HONEYPOT_KEY", hex.EncodeToString(key))
 	a, _ := app(t, honeypot.Options{}, map[string]json.RawMessage{
-		honeypot.Name: json.RawMessage(`{"key": "` + hex.EncodeToString(key) + `", "field": "homepage", "minDelay": -1, "protect": ["/contact"]}`),
+		honeypot.Name: json.RawMessage(`{"keyEnv": "TEST_HONEYPOT_KEY", "field": "homepage", "minDelay": "0s", "maxAge": "1h", "protect": ["/contact"]}`),
 	})
 	h := a.Handler()
 	if body := serve(h, httptest.NewRequest(http.MethodGet, "/", nil)).Body.String(); !strings.Contains(body, `name="homepage"`) {
 		t.Errorf("the field was not renamed:\n%s", body)
 	}
-	// Signed with the configured key, and sent at once: minDelay is off, as -1
-	// turned it off before 0 did.
+	// Signed with the key from the environment, and sent at once: minDelay is
+	// off.
 	values := url.Values{"message": {"hi"}, "_hpt": {signed(key, time.Now())}}
 	if rec := post(h, values); rec.Code != http.StatusSeeOther {
 		t.Errorf("status %d", rec.Code)
@@ -423,13 +439,17 @@ func TestStaticBuild(t *testing.T) {
 
 // A misconfigured plugin stops the application from being built.
 func TestMisconfiguration(t *testing.T) {
+	t.Setenv("TEST_HONEYPOT_BAD", "zz")
+	t.Setenv("TEST_HONEYPOT_EMPTY", "")
 	for name, opts := range map[string]honeypot.Options{
 		"short key":        {Key: []byte("short")},
-		"bad hex":          {KeyHex: "zz"},
+		"bad hex":          {KeyEnv: "TEST_HONEYPOT_BAD"},
+		"empty key env":    {KeyEnv: "TEST_HONEYPOT_EMPTY", Key: key},
 		"field with quote": {Key: key, Field: `a"b`},
 		"field clash":      {Key: key, Field: "_hpt"},
-		"negative delay":   {Key: key, MinDelay: -2},
-		"delay past age":   {Key: key, MinDelay: 10, MaxAge: 5},
+		"negative delay":   {Key: key, MinDelay: collage.Duration(-time.Second)},
+		"negative age":     {Key: key, MaxAge: collage.Duration(-time.Second)},
+		"delay past age":   {Key: key, MinDelay: collage.Duration(10 * time.Second), MaxAge: collage.Duration(5 * time.Second)},
 		"relative prefix":  {Key: key, Protect: []string{"contact"}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -623,7 +643,7 @@ func TestBadDelay(t *testing.T) {
 		a, err := collage.New(&collage.Config{
 			Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
 			Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<form method="post">` + call + `</form>`)}}, Root: "t"},
-			Plugins:  []collage.Plugin{honeypot.New(honeypot.Options{Key: key, MaxAge: 3600})},
+			Plugins:  []collage.Plugin{honeypot.New(honeypot.Options{Key: key, MaxAge: collage.Duration(time.Hour)})},
 		})
 		if err != nil {
 			continue

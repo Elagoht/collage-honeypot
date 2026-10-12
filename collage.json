@@ -29,17 +29,27 @@
         "type": "string",
         "description": "Field is the decoy's name: something a bot is keen to fill in. Default \"website\"."
       },
-      "key": {
+      "keyEnv": {
         "type": "string",
-        "description": "KeyHex is Key, hex-encoded, as configuration carries it."
+        "description": "KeyEnv names the environment variable holding the signing key, hex-encoded: at least 32 random bytes, the same on every instance and across restarts. When set, it wins over Key, and an empty or non-hex variable is an error. With neither, a key is generated per process, and a form served before a restart, or by another instance, is refused."
       },
       "maxAge": {
-        "type": "integer",
-        "description": "MaxAge is how many seconds a served form stays good for. Default 86400, one day."
+        "type": "string",
+        "description": "MaxAge is how long a served form stays good for. Default \"24h\".",
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
+        ]
       },
       "minDelay": {
-        "type": "number",
-        "description": "MinDelay is how many seconds a form must be open before it is sent, for a form that does not choose its own with {{honeypot seconds}}. It catches a script that fetches a form and posts it back at once. Default 0: off, since a person with autofill and Enter is fast, and a script that knows the delay only has to wait it out."
+        "type": "string",
+        "description": "MinDelay is how long a form must be open before it is sent, \"2s\", for a form that does not choose its own with {{honeypot seconds}}. It catches a script that fetches a form and posts it back at once. Default 0: off, since a person with autofill and Enter is fast, and a script that knows the delay only has to wait it out.",
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
+        ]
       },
       "protect": {
         "type": "array",
