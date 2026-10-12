@@ -182,7 +182,7 @@ matches.
 
 `minDelay` and `maxAge` are durations as Go writes them, `"300ms"`, `"24h"`; a
 bare number is an error. A `minDelay` of `"0s"`, the default, turns the check off;
-a negative one is an error. A `keyEnv` variable that is empty or not hex, a key
+a negative one, or one under `"1ms"`, is an error. A `keyEnv` variable that is empty or not hex, a key
 that is short, a field that is not a plain name, a `minDelay` not shorter than
 `maxAge`, a prefix without a leading `/` — each stops the application from
 starting. A delay

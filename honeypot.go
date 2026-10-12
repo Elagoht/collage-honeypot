@@ -90,7 +90,8 @@ type Options struct {
 	// form that does not choose its own with {{honeypot seconds}}. It catches a
 	// script that fetches a form and posts it back at once. Default 0: off, since
 	// a person with autofill and Enter is fast, and a script that knows the delay
-	// only has to wait it out.
+	// only has to wait it out. Anything but 0 is at least "1ms": the timestamp
+	// carries whole milliseconds.
 	MinDelay collage.Duration `json:"minDelay"`
 	// MaxAge is how long a served form stays good for. Default "24h".
 	MaxAge collage.Duration `json:"maxAge"`
@@ -217,6 +218,9 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 	}
 	if o.MinDelay < 0 {
 		return errors.New("honeypot: minDelay cannot be negative; 0 turns the check off")
+	}
+	if o.MinDelay > 0 && time.Duration(o.MinDelay) < time.Millisecond {
+		return fmt.Errorf("honeypot: minDelay %v is under a millisecond, which a timestamp cannot carry; write 0 to turn the check off, or 1ms or more", time.Duration(o.MinDelay))
 	}
 	if o.MaxAge < 0 {
 		return errors.New("honeypot: maxAge cannot be negative")

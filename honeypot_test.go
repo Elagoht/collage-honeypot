@@ -449,6 +449,7 @@ func TestMisconfiguration(t *testing.T) {
 		"field clash":      {Key: key, Field: "_hpt"},
 		"negative delay":   {Key: key, MinDelay: collage.Duration(-time.Second)},
 		"negative age":     {Key: key, MaxAge: collage.Duration(-time.Second)},
+		"sub-ms delay":     {Key: key, MinDelay: collage.Duration(500 * time.Microsecond)},
 		"delay past age":   {Key: key, MinDelay: collage.Duration(10 * time.Second), MaxAge: collage.Duration(5 * time.Second)},
 		"relative prefix":  {Key: key, Protect: []string{"contact"}},
 	} {
