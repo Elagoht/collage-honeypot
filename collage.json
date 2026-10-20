@@ -3,6 +3,7 @@
   "name": "elagoht/honeypot",
   "description": "A collage plugin that stops form spam without a CAPTCHA: a decoy field people never see, and a signed timestamp that says how long the form was open.",
   "repository": "https://github.com/Elagoht/collage-honeypot",
+  "setup": "Put `{{honeypot}}` inside each `<form method=\"post\">` to protect, beside `{{csrfToken}}`; a form without it is not checked.\nSet `\"keyEnv\": \"HONEYPOT_KEY\"` in `plugins-config.json`, and `HONEYPOT_KEY=` (`openssl rand -hex 32`) in `.env.development` and where production runs.",
   "templateFunctions": [
     {
       "name": "honeypot",
