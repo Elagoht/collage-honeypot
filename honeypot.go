@@ -3,7 +3,7 @@
 // form was open.
 //
 //	app, err := collage.New(&collage.Config{
-//		Plugins: []collage.Plugin{honeypot.New(honeypot.Options{KeyEnv: "HONEYPOT_KEY"})},
+//		Plugins: []collage.Plugin{honeypot.New(honeypot.Options{})},
 //	})
 //
 // and inside every form the site accepts:
@@ -73,13 +73,18 @@ const Name = "elagoht/honeypot"
 // TimeField is the hidden field the signed timestamp travels in.
 const TimeField = "_hpt"
 
+// DefaultKeyEnv is the environment variable the key is read from when neither
+// KeyEnv nor Key is set. Unlike one KeyEnv names, it may be unset or empty.
+const DefaultKeyEnv = "HONEYPOT_KEY"
+
 // Options configures the plugin.
 type Options struct {
 	// KeyEnv names the environment variable holding the signing key,
 	// hex-encoded: at least 32 random bytes, the same on every instance and
 	// across restarts. When set, it wins over Key, and an empty or non-hex
-	// variable is an error. With neither, a key is generated per process, and a
-	// form served before a restart, or by another instance, is refused.
+	// variable is an error. With neither, the key is read from HONEYPOT_KEY
+	// (DefaultKeyEnv); with that empty too, a key is generated per process, and
+	// a form served before a restart, or by another instance, is refused.
 	KeyEnv string `json:"keyEnv"`
 	// Key is the signing key itself, set from Go.
 	Key []byte `json:"-"`
@@ -174,7 +179,7 @@ func (l *learned) add(path string) (filled bool) {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.5.1" }
+func (p *Plugin) Version() string                { return "0.6.0" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
@@ -200,13 +205,19 @@ func (p *Plugin) Configure(_ context.Context, host collage.ConfigHost) error {
 			return fmt.Errorf("honeypot: the environment variable %s is not valid hex", o.KeyEnv)
 		}
 		o.Key = key
+	} else if raw := os.Getenv(DefaultKeyEnv); raw != "" && len(o.Key) == 0 {
+		key, err := hex.DecodeString(raw)
+		if err != nil {
+			return fmt.Errorf("honeypot: the environment variable %s is not valid hex", DefaultKeyEnv)
+		}
+		o.Key = key
 	}
 	if len(o.Key) == 0 {
 		o.Key = make([]byte, 32)
 		if _, err := rand.Read(o.Key); err != nil {
 			return fmt.Errorf("honeypot: %w", err)
 		}
-		p.log.Warn("honeypot: no key set, so one was generated for this process; a form served before a restart, or by another instance, is refused")
+		p.log.Warn("honeypot: no key set (" + DefaultKeyEnv + " is empty), so one was generated for this process; a form served before a restart, or by another instance, is refused")
 	} else if len(o.Key) < 32 {
 		return errors.New("honeypot: the key must be at least 32 bytes")
 	}

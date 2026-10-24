@@ -8,7 +8,7 @@ nothing in the configuration has to name the forms.
 
 ```go
 app, err := collage.New(&collage.Config{
-	Plugins: []collage.Plugin{honeypot.New(honeypot.Options{KeyEnv: "HONEYPOT_KEY"})},
+	Plugins: []collage.Plugin{honeypot.New(honeypot.Options{})},
 })
 ```
 
@@ -151,12 +151,19 @@ A static build has no request to stand in for the placeholder, so there
 ## The key
 
 Set a key of at least 32 random bytes, the same on every instance and across
-restarts — `openssl rand -hex 32` makes one. The key never goes in
-`plugins-config.json`: `keyEnv` names the environment variable that holds it,
-hex-encoded, and from Go `Options.Key` takes the bytes themselves.
+restarts — `openssl rand -hex 32` makes one — hex-encoded in the environment
+variable `HONEYPOT_KEY`, which is read with nothing configured:
+
+```sh
+HONEYPOT_KEY=…  # in .env.development, and where production runs
+```
+
+The key never goes in `plugins-config.json`: to read another variable, `keyEnv`
+names it, and from Go `Options.Key` takes the bytes themselves. A named `keyEnv`
+wins over `Options.Key`, which wins over `HONEYPOT_KEY`.
 
 ```json
-{ "elagoht/honeypot": { "keyEnv": "HONEYPOT_KEY" } }
+{ "elagoht/honeypot": { "keyEnv": "MY_HONEYPOT_KEY" } }
 ```
 
 Without one, a key is generated per process and a warning logged: a form served
@@ -169,7 +176,7 @@ matches.
 ```json
 {
   "elagoht/honeypot": {
-    "keyEnv": "HONEYPOT_KEY",
+    "keyEnv": "",
     "field": "website",
     "minDelay": "0s",
     "maxAge": "24h",
@@ -182,7 +189,7 @@ matches.
 
 `minDelay` and `maxAge` are durations as Go writes them, `"300ms"`, `"24h"`; a
 bare number is an error. A `minDelay` of `"0s"`, the default, turns the check off;
-a negative one, or one under `"1ms"`, is an error. A `keyEnv` variable that is empty or not hex, a key
+a negative one, or one under `"1ms"`, is an error. A `keyEnv` variable that is empty or not hex, a `HONEYPOT_KEY` that is not hex, a key
 that is short, a field that is not a plain name, a `minDelay` not shorter than
 `maxAge`, a prefix without a leading `/` — each stops the application from
 starting. A delay

@@ -3,7 +3,7 @@
   "name": "elagoht/honeypot",
   "description": "A collage plugin that stops form spam without a CAPTCHA: a decoy field people never see, and a signed timestamp that says how long the form was open.",
   "repository": "https://github.com/Elagoht/collage-honeypot",
-  "setup": "Put `{{honeypot}}` inside each `<form method=\"post\">` to protect, beside `{{csrfToken}}`; a form without it is not checked.\nSet `\"keyEnv\": \"HONEYPOT_KEY\"` in `plugins-config.json`, and `HONEYPOT_KEY=` (`openssl rand -hex 32`) in `.env.development` and where production runs.",
+  "setup": "Put `{{honeypot}}` inside each `<form method=\"post\">` to protect, beside `{{csrfToken}}`; a form without it is not checked.\nSet `HONEYPOT_KEY=` (`openssl rand -hex 32`) in `.env.development` and where production runs.",
   "templateFunctions": [
     {
       "name": "honeypot",
@@ -32,7 +32,7 @@
       },
       "keyEnv": {
         "type": "string",
-        "description": "KeyEnv names the environment variable holding the signing key, hex-encoded: at least 32 random bytes, the same on every instance and across restarts. When set, it wins over Key, and an empty or non-hex variable is an error. With neither, a key is generated per process, and a form served before a restart, or by another instance, is refused."
+        "description": "KeyEnv names the environment variable holding the signing key, hex-encoded: at least 32 random bytes, the same on every instance and across restarts. When set, it wins over Key, and an empty or non-hex variable is an error. With neither, the key is read from HONEYPOT_KEY (DefaultKeyEnv); with that empty too, a key is generated per process, and a form served before a restart, or by another instance, is refused."
       },
       "maxAge": {
         "type": "string",

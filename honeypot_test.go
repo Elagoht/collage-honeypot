@@ -417,6 +417,29 @@ func TestConfiguration(t *testing.T) {
 	}
 }
 
+// With no keyEnv and no Key, HONEYPOT_KEY signs; a Key set in Go wins over it.
+func TestDefaultKeyEnv(t *testing.T) {
+	t.Setenv(honeypot.DefaultKeyEnv, hex.EncodeToString(key))
+	a, _ := app(t, honeypot.Options{}, map[string]json.RawMessage{
+		honeypot.Name: json.RawMessage(`{"minDelay": "0s", "protect": ["/contact"]}`),
+	})
+	values := url.Values{"message": {"hi"}, "_hpt": {signed(key, time.Now())}}
+	if rec := post(a.Handler(), values); rec.Code != http.StatusSeeOther {
+		t.Errorf("signed with HONEYPOT_KEY: status %d", rec.Code)
+	}
+
+	t.Setenv(honeypot.DefaultKeyEnv, "zz")
+	_, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`{{honeypot}}`)}}, Root: "t"},
+		Plugins:  []collage.Plugin{honeypot.New(honeypot.Options{})},
+	})
+	if err == nil || !strings.Contains(err.Error(), "HONEYPOT_KEY is not valid hex") {
+		t.Errorf("bad HONEYPOT_KEY: err = %v", err)
+	}
+	app(t, honeypot.Options{Key: key}, nil)
+}
+
 // A static build has no middleware to stand in for the placeholder, so the page
 // carries the decoy and no timestamp.
 func TestStaticBuild(t *testing.T) {
