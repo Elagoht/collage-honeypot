@@ -23,8 +23,9 @@
 //
 // A form that carries {{honeypot}} is what says its target is protected: every
 // form the plugin stamps names the path it posts to, and from then on a form
-// body posted there must carry the fields. A form without {{honeypot}} is never
-// checked. Protect adds path prefixes that are checked whether or not a form
+// body posted there must carry the fields; once a submission reaches an action
+// through such a path, the action is checked on every path it answers. A form
+// without {{honeypot}} posting elsewhere is never checked. Protect adds path prefixes that are checked whether or not a form
 // naming them has been served yet — which is what closes the gap after a
 // restart, or on another instance, before the first such page goes out.
 //
@@ -53,6 +54,7 @@ import (
 	"html"
 	"html/template"
 	"log/slog"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
@@ -62,6 +64,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Elagoht/collage/pkg/collage"
@@ -128,18 +131,27 @@ type Plugin struct {
 	log     *slog.Logger
 	marker  string
 	learned learned
+	// actions are the actions a submission reached through a learned path:
+	// each is checked on every path from then on. They are the application's
+	// own registered actions, so the set is bounded by how many it has.
+	actions sync.Map // *collage.Action → struct{}
+	// warned is when the last warning that the learned set is full was
+	// logged, in Unix seconds: a flood of junk paths warns once a minute, not
+	// once a path.
+	warned atomic.Int64
 }
 
-// learnedLimit is how many paths are learned from forms before the plugin stops
-// learning more: a form whose action carries an id, one path per record, would
-// otherwise grow the set without end.
+// learnedLimit is how many paths are learned from forms at most: a form whose
+// action carries an id, one path per record, would otherwise grow the set without
+// end. Past it, the path stamped least recently is forgotten for the new one.
 const learnedLimit = 4096
 
-// learned are the paths the forms this process served post to.
+// learned are the paths the forms this process served post to, each with when
+// a form posting to it was last stamped.
 type learned struct {
 	mu    sync.RWMutex
-	paths map[string]struct{}
-	full  bool
+	paths map[string]*atomic.Uint64
+	clock atomic.Uint64
 }
 
 func (l *learned) has(path string) bool {
@@ -149,29 +161,44 @@ func (l *learned) has(path string) bool {
 	return ok
 }
 
-// add learns path, and reports whether the set had just filled up.
-func (l *learned) add(path string) (filled bool) {
+// add learns path, or marks it seen again, and reports whether another path was
+// forgotten to make room for it. Seeing a known path again takes only the read
+// lock; only a new path takes the write lock, and only a new path into a full
+// set pays for finding the one seen least recently.
+func (l *learned) add(path string) (evicted bool) {
+	now := l.clock.Add(1)
 	l.mu.RLock()
-	_, ok := l.paths[path]
-	full := l.full
+	seen, ok := l.paths[path]
+	if ok {
+		seen.Store(now)
+	}
 	l.mu.RUnlock()
-	if ok || full {
+	if ok {
 		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if seen, ok := l.paths[path]; ok {
+		seen.Store(now)
+		return false
+	}
 	if l.paths == nil {
-		l.paths = map[string]struct{}{}
+		l.paths = map[string]*atomic.Uint64{}
 	}
 	if len(l.paths) >= learnedLimit {
-		if l.full {
-			return false
+		oldest, at := "", uint64(math.MaxUint64)
+		for p, seen := range l.paths {
+			if t := seen.Load(); t < at {
+				oldest, at = p, t
+			}
 		}
-		l.full = true
-		return true
+		delete(l.paths, oldest)
+		evicted = true
 	}
-	l.paths[path] = struct{}{}
-	return false
+	seen = new(atomic.Uint64)
+	seen.Store(now)
+	l.paths[path] = seen
+	return evicted
 }
 
 // New returns a plugin with opts as its starting point, which the application's
@@ -179,7 +206,7 @@ func (l *learned) add(path string) (filled bool) {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string                   { return Name }
-func (p *Plugin) Version() string                { return "0.6.0" }
+func (p *Plugin) Version() string                { return "0.6.1" }
 func (p *Plugin) Shutdown(context.Context) error { return nil }
 
 var fieldName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
@@ -312,8 +339,12 @@ func (p *Plugin) fields(static bool, delay int) template.HTML {
 	return template.HTML(decoy + `<input type="hidden" name="` + TimeField + `" value="` + placeholder + `">`)
 }
 
-// checks reports whether r is a form submission the plugin checks.
-func (p *Plugin) checks(r *http.Request) bool {
+// checks reports whether r, a submission to action, is one the plugin checks. A
+// submission reaching action through a learned path marks the action, and a
+// marked action is checked on every path: its path being forgotten for newer
+// ones, or a record whose form this process has not served, does not leave it
+// open.
+func (p *Plugin) checks(r *http.Request, action *collage.Action) bool {
 	switch r.Method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 	default:
@@ -340,7 +371,17 @@ func (p *Plugin) checks(r *http.Request) bool {
 			return true
 		}
 	}
-	return p.learned.has(clean)
+	if p.learned.has(clean) {
+		if action != nil {
+			p.actions.Store(action, struct{}{})
+		}
+		return true
+	}
+	if action != nil {
+		_, marked := p.actions.Load(action)
+		return marked
+	}
+	return false
 }
 
 func cleanPath(p string) string {
@@ -361,7 +402,7 @@ func cleanPath(p string) string {
 // form to read, and passes unchecked.
 func (p *Plugin) OnBeforeAction(_ context.Context, ev *collage.BeforeActionEvent) error {
 	r := ev.Request
-	if !p.checks(r) {
+	if !p.checks(r, ev.Action) {
 		return nil
 	}
 	form, err := ev.Form()
@@ -535,13 +576,25 @@ func (p *Plugin) stampAll(r *http.Request, body []byte) ([]byte, bool) {
 			}
 		}
 		if path, ok := formTarget(r, body, at); ok && p.learned.add(path) {
-			p.log.Warn("honeypot: learned the most paths it keeps from forms; set protect for the paths not yet learned", "limit", learnedLimit)
+			p.warnFull()
 		}
 		out = append(out, body[rest:at]...)
 		out = append(out, p.stamp(now, delay)...)
 		rest = end
 	}
 	return append(out, body[rest:]...), true
+}
+
+// warnFull says, at most once a minute, that the learned set is full and paths
+// are being forgotten.
+func (p *Plugin) warnFull() {
+	now := time.Now().Unix()
+	last := p.warned.Load()
+	if now-last < 60 || !p.warned.CompareAndSwap(last, now) {
+		return
+	}
+	p.log.Warn("honeypot: learned the most paths it keeps from forms, so the least recently served are forgotten; set protect for the forms that must be checked from the first submission",
+		"limit", learnedLimit)
 }
 
 // formTarget is the clean path the form around body[at] posts to: its action,

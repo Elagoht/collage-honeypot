@@ -54,7 +54,21 @@ form without `{{honeypot}}` is never checked, so a sign-up form can go without
 while the login form beside it is protected, and nothing in the configuration
 names either.
 
-What a process has learned it keeps in memory, up to 4096 paths. **Until a page
+What a process has learned it keeps in memory, up to 4096 paths; past that, the
+path whose form was served least recently is forgotten to make room for the new
+one, and a warning is logged at most once a minute. A submission that reaches an
+action through a learned path marks the action itself, and a marked action is
+checked on every path from then on: a page answering any path with a form —
+`/p/{id}`, or a not-found page with a newsletter form — cannot push a real form's
+path out, and a comment form for record 2 is checked once one for record 1 has
+been posted to. Until an action's first submission through a learned path,
+its path can still be pushed out by 4096 newer ones before the form is posted;
+`Protect` closes that.
+
+A full set is not answered by checking every form: a form that never carried
+`{{honeypot}}` — a log-out button, another plugin's form — would then be refused.
+
+**Until a page
 with the form has gone out, its path is not checked**: after a restart or a new
 release, or on an instance that has not served it yet, a bot that posts straight
 to the path without fetching the form first gets through, until the first reader
@@ -218,6 +232,14 @@ render.
   not checked at all; list such a path in `Protect`.
 
 ## Changes
+
+### Changed in v0.6.1
+
+- Learning no longer stops at 4096 paths. Before, a page answering any path
+  with a `{{honeypot}}` form let a client fill the set with junk after a
+  restart, and every form path not yet learned was left unchecked until the
+  process restarted. Now the least recently served path is forgotten for a new
+  one, and an action reached through a learned path is checked on every path.
 
 ### v0.5.0
 
